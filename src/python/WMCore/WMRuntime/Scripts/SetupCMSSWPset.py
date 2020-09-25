@@ -35,6 +35,7 @@ class SetupCMSSWPset(ScriptInterface):
         self.process = None
         self.jobBag = None
         self.logger = logging.getLogger()
+        self.tweak = PSetTweak()
 
     def createProcess(self, scenario, funcName, funcArgs):
         """
@@ -126,32 +127,38 @@ class SetupCMSSWPset(ScriptInterface):
         self.logger.info("Job seeding set to: %s", seeding)
         if seeding == "ReproducibleSeeding":
             randService = self.process.RandomNumberGeneratorService
-            tweak = PSetTweak()
             for x in randService:
                 parameter = "process.RandomNumberGeneratorService.%s.initialSeed" % x._internal_name
-                tweak.addParameter(parameter, x.initialSeed)
-            self.logger.info("--- Random seeding Level Tweaks ---")
-            seedTweakfile = "/tmp/seedTweak_{0}.json".format(stepName)
-            seedTweakInput = "/tmp/seedTweak_input_{0}.pkl".format(stepName)
-            seedTweakOutput = "/tmp/seedTweak_output_{0}.pkl".format(stepName)
-            self.logger.info("Create job level tweak, write to: {0}".format(seedTweakfile))
-            self.logger.info("Pickled applyTweak input object: {0}".format(seedTweakInput))
-            pickle.dump(self.process, open(seedTweakInput, "wb"))
-            tweak.persist(seedTweakfile, formatting="json")
-            applyTweak(self.process, tweak, self.fixupDict)
-            self.logger.info("Pickled applyTweak output object: {0}".format(seedTweakOutput))
-            pickle.dump(self.process, open(seedTweakOutput, "wb"))
-        else:
-            if hasattr(self.process, "RandomNumberGeneratorService"):
-                from IOMC.RandomEngine.RandomServiceHelper import RandomNumberServiceHelper
-                helper = RandomNumberServiceHelper(self.process.RandomNumberGeneratorService)
-                helper.populate()
+                self.tweak.addParameter(parameter, x.initialSeed)
+        # @TODO This needs to go in scram environment
+        #else:
+        #    if hasattr(self.process, "RandomNumberGeneratorService"):
+        #        from IOMC.RandomEngine.RandomServiceHelper import RandomNumberServiceHelper
+        #        helper = RandomNumberServiceHelper(self.process.RandomNumberGeneratorService)
+        #        helper.populate()
         return
 
-    def handleChainedProcessing(self):
+
+    def makeThreadsStreamsTweak(self):
+        origCores = int(getattr(self.step.data.application.multicore, 'numberOfCores', 1))
+        eventStreams = int(getattr(self.step.data.application.multicore, 'eventStreams', 0))
+        resources = {'cores': origCores}
+        resizeResources(resources)
+        numCores = resources['cores']
+        if numCores != origCores:
+            self.logger.info(
+                "Resizing a job with nStreams != nCores. Setting nStreams = nCores. This may end badly.")
+            eventStreams = 0
+    
+        self.tweak.addParameter("process.options.numberOfThreads", numCores)
+        self.tweak.addParameter("process.options.numberOfStreams", eventStreams)
+    
+        return
+    
+    def handleChainedProcessingTweak(self):
         """
         _handleChainedProcessing_
-
+    
         In order to handle chained processing it's necessary to feed
         output of one step/task (nomenclature ambiguous) to another.
         This method creates particular mapping in a working Trivial
@@ -165,21 +172,19 @@ class SetupCMSSWPset(ScriptInterface):
                                         self.step.data.input.inputOutputModule))
         tfc.addMapping("direct", inputFile, inputFile, mapping_type="lfn-to-pfn")
         tfc.addMapping("direct", inputFile, inputFile, mapping_type="pfn-to-lfn")
-
-        fixupFileNames(self.process)
-        fixupMaxEvents(self.process)
-        self.process.source.fileNames.setValue([inputFile])
-        self.process.maxEvents.input.setValue(-1)
-
+    
+        self.tweak.addParameter('process.source.fileNames', [inputFile])
+        self.tweak.addParameter('process.maxEvents.input', -1)
+    
         tfcName = "override_catalog.xml"
         tfcPath = os.path.join(os.getcwd(), tfcName)
         self.logger.info("Creating override TFC and saving into '%s'", tfcPath)
         tfcStr = tfc.getXML()
         with open(tfcPath, 'w') as tfcFile:
             tfcFile.write(tfcStr)
-
+    
         self.step.data.application.overrideCatalog = "trivialcatalog_file:" + tfcPath + "?protocol=direct"
-
+    
         return
 
     def handlePileup(self):
@@ -422,11 +427,14 @@ class SetupCMSSWPset(ScriptInterface):
         Examine the step configuration and construct a PSet from that.
 
         """
+        self.logger.info("--- Line 1 ---")
         self.logger.info("Executing SetupCMSSWPSet...")
         self.jobBag = self.job.getBaggage()
 
         scenario = getattr(self.step.data.application.configuration, "scenario", None)
+        self.logger.info("scenario = {0}".format(scenario))
         if scenario is not None and scenario != "":
+            # @TODO: Deal with process creation in CMSSW?
             self.logger.info("Setting up job scenario/process")
             funcName = getattr(self.step.data.application.configuration, "function", None)
             if getattr(self.step.data.application.configuration, "pickledarguments", None) is not None:
@@ -434,6 +442,7 @@ class SetupCMSSWPset(ScriptInterface):
             else:
                 funcArgs = {}
             try:
+                self.logger.info("createProcess: funName, funcArgs = {0}, {1}".format(funcName, funcArgs))
                 self.createProcess(scenario, funcName, funcArgs)
             except Exception as ex:
                 self.logger.exception("Error creating process for Config/DataProcessing:")
@@ -442,58 +451,52 @@ class SetupCMSSWPset(ScriptInterface):
             if funcName in ["merge", "alcaHarvesting"]:
                 self.handleSingleCoreOverride()
 
+        # This is normally loaded in SCRAM, but we cannot use it outside scram
+        #else:
+        #    try:
+        #        self.logger.info("Loading PSET") 
+        #        self.loadPSet() 
+        #    except Exception as ex: 
+        #        self.logger.exception("Error loading PSet:")    
+        #        raise ex
+
         # Check process.source exists
+        # @TODO: This is not really needed, as process won't be used.
         if self.process is None:
             self.process = PSetHolder("process")
             setattr(self.process, "source", PSetHolder("source"))
             self.process.parameters_.append("source")
 
 
+        self.logger.info("--- Line 2 ---")
         # In case of CRAB3, the number of threads in the PSet should not be overridden
         if not self.crabPSet:
             try:
-                origCores = int(getattr(self.step.data.application.multicore, 'numberOfCores', 1))
-                eventStreams = int(getattr(self.step.data.application.multicore, 'eventStreams', 0))
-                resources = {'cores': origCores}
-                resizeResources(resources)
-                numCores = resources['cores']
-                if numCores != origCores:
-                    self.logger.info(
-                        "Resizing a job with nStreams != nCores. Setting nStreams = nCores. This may end badly.")
-                    eventStreams = 0
-                options = getattr(self.process, "options", None)
-                if options is None:
-                    setattr(self.process, "options", PSetHolder("options"))
-
-                setattr(self.process.options, "numberOfThreads", numCores)
-                setattr(self.process.options, "numberOfStreams", eventStreams)
-                self.process.options.numberOfThreads.parameters_.append("numberOfThreads")
-                self.process.options.numberOfThreads.parameters_.append("numberOfStreams")
-
+                self.makeThreadsStreamsTweak()
             except AttributeError as ex:
                 self.logger.error("Failed to override numberOfThreads: %s", str(ex))
 
-        tweak = PSetTweak()
+        self.logger.info("--- Line 3 ---")
         # Apply task level tweaks
         stepName = self.step.data._internal_name
         self.logger.info("--- Task Level Tweaks ---")
-        makeTaskTweak(self.step.data, tweak)
+        makeTaskTweak(self.step.data, self.tweak)
 
         # Check if chained processing is enabled
         # If not - apply the per job tweaks
         # If so - create an override TFC (like done in PA) and then modify thePSet accordingly
         if hasattr(self.step.data.input, "chainedProcessing") and self.step.data.input.chainedProcessing:
-            pass
-            #self.handleChainedProcessing()
+            self.handleChainedProcessingTweak()
         else:
             # Apply per job PSet Tweaks
             self.logger.info("--- Job Level Tweaks ---")
-            jobTweak = makeJobTweak(self.job, tweak)
+            jobTweak = makeJobTweak(self.job, self.tweak)
 
         # check for pileup settings presence, pileup support implementation
         # and if enabled, process pileup configuration / settings
-        if hasattr(self.step.data, "pileup"):
-            self.handlePileup()
+        # @TODO Does it need scram environment?
+        ##if hasattr(self.step.data, "pileup"):
+        ##    self.handlePileup()
 
         # Apply per output module PSet Tweaks
         cmsswStep = self.step.getTypeHelper()
@@ -501,40 +504,44 @@ class SetupCMSSWPset(ScriptInterface):
             mod = cmsswStep.getOutputModule(om)
             modName = str(getattr(mod, "_internal_name"))
             self.logger.info("--- outputModule Level Tweaks ---")
-            outTweak = makeOutputTweak(mod, self.job, tweak)
+            outTweak = makeOutputTweak(mod, self.job, self.tweak)
 
+        self.logger.info("--- Line 4 ---")
         # revlimiter for testing
         if getattr(self.step.data.application.command, "oneEventMode", False):
-            self.process.maxEvents.input = 1
+            self.tweak.addParameter('process.maxEvents.input', 1)
 
         # check for random seeds and the method of seeding which is in the job baggage
         self.handleSeeding()
 
+        self.logger.info("--- Line 5 ---")
         # check for event numbers in the producers
+        # @TODO Needs scram environment
         #self.handleProducersNumberOfEvents()
 
         # tweak jobs for enforceGUIDInFileName
+        # @TODO: Needs scram environment
         #self.handleEnforceGUIDInFileName()
 
         # Check if we accept skipping bad files
         if hasattr(self.step.data.application.configuration, "skipBadFiles"):
-            tweak.addParameter("process.source.skipBadFiles", bool(self.step.data.application.configuration.skipBadFiles))
+            self.tweak.addParameter("process.source.skipBadFiles", 
+                bool(self.step.data.application.configuration.skipBadFiles))
 
         # Apply events per lumi section if available
         if hasattr(self.step.data.application.configuration, "eventsPerLumi"):
-            tweak.addParameter("process.source.numberEventsInLuminosityBlock",
+            self.tweak.addParameter("process.source.numberEventsInLuminosityBlock",
                 self.step.data.application.configuration.eventsPerLumi)
 
         # limit run time if desired
         if hasattr(self.step.data.application.configuration, "maxSecondsUntilRampdown"):
-            setattr(self.process, "maxSecondsUntilRampdown", PSetHolder("maxSecondsUntilRampdown"))
-            setattr(self.process.maxSecondsUntilRampdown, "input", self.step.data.application.configuration.maxSecondsUntilRampdown)
-            self.process.maxSecondsUntilRampdown.parameters_.append("input")
+            self.tweak.addParameter("process.maxSecondsUntilRampdown.input", 
+                self.step.data.application.configuration.maxSecondsUntilRampdown)
 
         # accept an overridden TFC from the step
         if hasattr(self.step.data.application, 'overrideCatalog'):
             self.logger.info("Found a TFC override: %s", self.step.data.application.overrideCatalog)
-            tweak.addParameter("process.source.overrideCatalog",
+            self.tweak.addParameter("process.source.overrideCatalog",
                 str(self.step.data.application.overrideCatalog))
 
         configFile = self.step.data.application.command.configuration
@@ -546,7 +553,8 @@ class SetupCMSSWPset(ScriptInterface):
         except Exception as ex:
             self.logger.exception("Error writing out PSet:")
             raise
-        tweak.persist("PSetTweak.json")
+        self.tweak.persist("PSetTweak.json", formatting='json')
         self.logger.info("CMSSW PSetTweak JSON completed!")
 
+        self.logger.info("--- Line 6 ---")
         return 0
