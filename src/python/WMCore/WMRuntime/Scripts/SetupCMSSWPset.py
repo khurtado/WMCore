@@ -403,7 +403,7 @@ class SetupCMSSWPset(ScriptInterface):
 
         if getattr(self.jobBag, "skipPileupEvents", None):
             randomSeed = self.job['task']
-            cmd += "--skip_pileup_events --random_seed %s" %(randomSeed)
+            cmd += " --skip_pileup_events --random_seed %s" %(randomSeed)
         self.scramRun(cmd)
 
         return
