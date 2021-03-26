@@ -97,6 +97,7 @@ class SetupCMSSWPset(ScriptInterface):
         return scram
 
     def scramRun(self, cmdArgs):
+        self.logger.info("ScramRun command args: %s" % cmdArgs)
         if self.scram:
             retval = self.scram(command=cmdArgs)
             if retval > 0:
@@ -609,14 +610,19 @@ class SetupCMSSWPset(ScriptInterface):
             return os.environ.get("CMSSW_VERSION", "")
 
 
-    def getScramVersion(self):
+    def getScramVersion(self, allSteps=False):
         """
         _getScramVersion_
 
-        Return a string representing the Scram version to be used.
+        Return a string representing the first Scram version to be used (or all)
         """
         if not self.crabPSet:
-            return self.step.data.application.setup.scramArch
+            scramArch = self.step.data.application.setup.scramArch
+            if allSteps:
+                return scramArch
+            else:
+                if type(scramArch) == list:
+                    return next(iter(scramArch or []), None)
         else:
             # CRAB3 needs to use an environment var to get the version
             return os.environ.get("SCRAM_ARCH", "")
