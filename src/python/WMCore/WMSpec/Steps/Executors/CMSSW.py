@@ -255,6 +255,8 @@ class CMSSW(Executor):
 
         # possibly needed environment overrides for CMSSW call go here
         envOverride = {}
+        # Do not pass WM PYTHONPATH to CMSSW environment
+        envOverride['PYTHONPATH'] = ""
         # work around problem with GSI authentication plugin and EOS at CERN
         if socket.getfqdn().endswith("cern.ch"):
             envOverride['XRD_LOADBALANCERTTL'] = "86400"
