@@ -1,3 +1,78 @@
+1.4.7.pre8 to 1.4.7:
+  - Update CMS WM overview schematic (Alan Malta Rodrigues) #10438
+
+
+1.4.7.pre7 to 1.4.7.pre8:
+  - [py2py3] src/python/A/B/C slice 25 - issue #10149 - src (Dario Mapelli) #10379
+
+
+1.4.7.pre6 to 1.4.7.pre7:
+  - Reorganize MicroService unit tests (Alan Malta Rodrigues) #10373
+  - Account for tape rule status in MSRulecleaner. (Todor Ivanov) #10370
+  - [py2py3] src/python/A/B/C slice 24 - issue #10148 - src (Dario Mapelli) #10371
+  - [py2py3] src/python/A/B/C slice 22 - issue #10146 - src (Dario Mapelli) #10362
+  - [py2py3] src/python/A/B/C slice 23 - issue #10147 - src (Dario Mapelli) #10363
+
+
+1.4.7.pre5 to 1.4.7.pre6:
+  - Change regex when building list of PR numbers in buildrelease (Alan Malta Rodrigues) #10372
+  - Remove datatier-based functionality from RucioInjector (Alan Malta Rodrigues) #10369
+  - Respect port provided by the client && Switch from urllib.urlparse to simple substring replacement. (Todor Ivanov) #10364
+  - Remove PhEDExInjector component and its config/deploy code (Alan Malta Rodrigues) #10366
+  - [py2py3] src/python/A/B/C slice 21 - issue #10145 - src (Dario Mapelli) #10361
+
+
+1.4.7.pre4 to 1.4.7.pre5:
+  - Moving portForward in Utils && Minimize number of decorated functions && Remove argument parsing from the decorator && Remove static url chage from Services. (Todor Ivanov) #10330
+  - Forward WMCore.Services.Requests class to port 8443 for cmsweb services. (Todor Ivanov) #10330
+  - Reorganize microservices package structure; remove unused (Alan Malta Rodrigues) #10357
+  - Switch microservices to use AlertManager (Erik Gough) #10346
+  - [py2py3] src/python/A/B/C slice 20 - issue #10144 - src (Dario Mapelli) #10349
+
+
+1.4.7.pre3 to 1.4.7.pre4:
+  - add __init__ module for AlertManager package (Alan Malta Rodrigues) #10358
+  - Add AlertManager API (Erik Gough) #10308
+  - Add py3-cmsmonitoring to the list of python3 requirements (Alan Malta Rodrigues) #10355
+  - [py2py3] src/python/A/B/C slice 18 - issue #10142 - src (Dario Mapelli) #10331
+  - [py2py3] src/python/A/B/C slice 17 - issue #10141 - src (Dario Mapelli) #10329
+  - [py2py3] src/python/A/B/C slice 19 - issue #10143 - src (Dario Mapelli) #10348
+
+
+1.4.7.pre2 to 1.4.7.pre3:
+  - added Rucio mock data json (Alan Malta Rodrigues) #10342
+  - added script to query Rucio and create mock data (Alan Malta Rodrigues) #10342
+  - Reject blocks without any Rucio files in GQ (Alan Malta Rodrigues) #10342
+  - allw to run REST/Main in frontend via env.var. fix #10266 (belforte) #10339
+  - Dont map pileup location to the campaign top level site lists (Alan Malta Rodrigues) #10338
+  - MSTransferor: iterate over a dictionary as a list when it can change (Alan Malta Rodrigues) #10337
+
+
+1.4.7.pre1 to 1.4.7.pre2:
+  - [py2py3] src/python/A/B/C slice 16 - issue #10140 - src (Dario Mapelli) #10321
+  - [py2py3] src/python/A/B/C slice 15 - issue #10139 - src (Dario Mapelli) #10319
+  - Add check and different path for wmagent component. (tivanov) #10327
+  - Fix values for the "submitted" key in JobSummary (Alan Malta Rodrigues) #10325
+  - [py2py3] src/python/A/B/C slice 14 - issue #10138 - src (Dario Mapelli) #10313
+  - [py2py3] src/python/A/B/C slice 13 - issue #10137 - src (Dario Mapelli) #10310
+
+
+1.4.6 to 1.4.7.pre1:
+  - [py2py3] src/python/A/B/C slice 12 - issue #10136 - src (Dario Mapelli) #10307
+  - [py2py3] src/python/A/B/C slice 11 - issue #10135 - src (Dario Mapelli) #10299
+  - Fix unhashable types in the ReqMgr2 request API with mask (Alan Malta Rodrigues) #10312
+  - Fix to unhashable types in the filtered_requests REST API (Alan Malta Rodrigues) #10311
+  - Validate status transition for cascade option (Alan Malta Rodrigues) #10309
+
+
+1.4.6.pre9 to 1.4.6:
+
+
+1.4.6.pre8 to 1.4.6.pre9:
+  - Add check for None dataContainer. (Todor Ivanov) #10320
+  - Update deployment script to accept python3 WMAgent service (Alan Malta Rodrigues) #10302
+
+
 1.4.6.pre7 to 1.4.6.pre8:
   - Include logic for cleaning input data rules. (Todor Ivanov) #10224
 

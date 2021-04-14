@@ -5,6 +5,7 @@ Create a CMSSW PSet suitable for running a WMAgent job.
 
 """
 from __future__ import print_function
+from future.utils import viewitems
 
 import json
 import logging

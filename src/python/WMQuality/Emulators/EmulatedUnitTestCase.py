@@ -62,8 +62,7 @@ class EmulatedUnitTestCase(unittest.TestCase):
         if self.mockPhEDEx:
             self.phedexPatchers = []
             patchPhedexAt = ['WMCore.Services.PhEDEx.PhEDEx.PhEDEx',
-                             'WMCore.WorkQueue.WorkQueue.PhEDEx',
-                             'WMComponent.PhEDExInjector.PhEDExInjectorPoller.PhEDEx']
+                             'WMCore.WorkQueue.WorkQueue.PhEDEx']
             for module in patchPhedexAt:
                 self.phedexPatchers.append(mock.patch(module, new=MockPhEDExApi))
                 self.phedexPatchers[-1].start()
@@ -74,6 +73,7 @@ class EmulatedUnitTestCase(unittest.TestCase):
             patchRucioAt = ['WMCore.WorkQueue.WorkQueue.Rucio',
                             'WMCore.WorkQueue.WorkQueueReqMgrInterface.Rucio',
                             'WMCore.WorkQueue.Policy.Start.StartPolicyInterface.Rucio',
+                            'WMComponent.RucioInjector.RucioInjectorPoller.Rucio',
                             'WMCore.WMSpec.Steps.Fetchers.PileupFetcher.Rucio',
                             'WMCore_t.WMSpec_t.Steps_t.Fetchers_t.PileupFetcher_t.Rucio']
             for module in patchRucioAt:
