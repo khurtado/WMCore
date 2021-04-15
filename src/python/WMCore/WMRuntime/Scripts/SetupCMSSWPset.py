@@ -5,15 +5,12 @@ Create a CMSSW PSet suitable for running a WMAgent job.
 
 """
 from __future__ import print_function
-from future.utils import viewitems
 
 import json
 import logging
 import os
 import pickle
-import random
 import socket
-import re
 
 from PSetTweaks.PSetTweak import PSetTweak
 from PSetTweaks.WMTweak import  makeJobTweak, makeOutputTweak, makeTaskTweak, resizeResources
@@ -34,6 +31,11 @@ def factory(module, name):
     """
 
     class DummyClass:
+        """
+        _DummyClass_
+        Dummy class to return when a cms class cannot be imported 
+
+        """
         def __init__(self, module, name='', *args, **kwargs):
             self.__module = module
             self.__name = name
@@ -62,10 +64,7 @@ class Unpickler(pickle.Unpickler):
 
     """
     def find_class(self, module, name):
-        try:
-            return super().find_class(module, name)
-        except:
-            return factory(module, name)
+        return factory(module, name)
 
 
 class SetupCMSSWPset(ScriptInterface):
@@ -86,6 +85,12 @@ class SetupCMSSWPset(ScriptInterface):
         self.psetFile = None
 
     def createScramEnv(self):
+        """
+        _createScramEnv_
+
+        Create scram environment
+
+        """
         scram = Scram(
             version=self.getCmsswVersion(),
             directory=self.stepSpace.location,
@@ -98,7 +103,13 @@ class SetupCMSSWPset(ScriptInterface):
         return scram
 
     def scramRun(self, cmdArgs):
-        self.logger.info("ScramRun command args: %s" % cmdArgs)
+        """
+        _scramRun_
+
+        Run command inside scram environment
+
+        """
+        self.logger.info("ScramRun command args: %s", cmdArgs)
         if self.scram:
             retval = self.scram(command=cmdArgs)
             if retval > 0:
@@ -107,7 +118,7 @@ class SetupCMSSWPset(ScriptInterface):
                 raise RuntimeError(msg)
         else:
             raise RuntimeError("Scram is not defined")
-        
+
     def createProcess(self, scenario, funcName, funcArgs):
         """
         _createProcess_
@@ -127,16 +138,16 @@ class SetupCMSSWPset(ScriptInterface):
                 with open(funcArgsJson, 'wb') as f:
                     json.dump(funcArgs, f)
             except Exception as ex:
-                self.logger.exception("Error writing out process funcArgs json:")
-                raise
+                self.logger.exception("Error writing out process funcArgs json")
+                raise ex
             funcArgsParam = funcArgsJson
         else:
             try:
                 with open(processJson, 'wb') as f:
-                    processJson = json.dump(processDic, f)
+                    json.dump(processDic, f)
             except Exception as ex:
-                self.logger.exception("Error writing out process scenario json:")
-                raise
+                self.logger.exception("Error writing out process scenario json")
+                raise ex
             funcArgsParam = processJson
 
         cmd = "%s --output_pkl %s --funcname %s --funcargs %s" % (
@@ -146,7 +157,6 @@ class SetupCMSSWPset(ScriptInterface):
             funcArgsParam)
 
         if funcName == "merge":
-            self.logger.info("useErrorDataset = {0}".format(getattr(self.jobBag, "useErrorDataset", False)))
             if getattr(self.jobBag, "useErrorDataset", False):
                 cmd += " --useErrorDataset"
 
@@ -162,10 +172,9 @@ class SetupCMSSWPset(ScriptInterface):
         handled externally.
 
         """
-        self.logger.info("Working dir: %s" % os.getcwd())
+        self.logger.info("Working dir: %s", os.getcwd())
         # Pickle original pset configuration
         procScript = "edm_pset_pickler.py"
-        pset = os.path.join(self.stepSpace.location, self.psetFile)
         cmd = "%s --input %s --output_pkl %s" % (
             procScript,
             os.path.join(self.stepSpace.location, self.psetFile),
@@ -176,7 +185,7 @@ class SetupCMSSWPset(ScriptInterface):
             with open(os.path.join(self.stepSpace.location, self.configPickle), 'rb') as f:
                 self.process = Unpickler(f).load()
         except ImportError as ex:
-            msg = "Unable to import pset from %s:\n" % psetFile
+            msg = "Unable to import pset from %s:\n" % self.psetFile
             msg += str(ex)
             self.logger.error(msg)
             raise ex
@@ -207,7 +216,7 @@ class SetupCMSSWPset(ScriptInterface):
 
         for outMod in outputModuleNames:
             tweak = PSetTweak()
-            self.logger.info("DEBUG output module = %s" % outMod)
+            self.logger.info("DEBUG output module = %s", outMod)
             tweak.addParameter("process.options", "customTypeCms.untracked.PSet()")
             tweak.addParameter("process.%s.dataset" % outMod, "customTypeCms.untracked.PSet(dataTier=cms.untracked.string(''), filterName=cms.untracked.string(''))")
             self.applyPsetTweak(tweak, skipIfSet=True, cleanupTweak=True)
@@ -246,9 +255,8 @@ class SetupCMSSWPset(ScriptInterface):
 
         Handle Random Seed settings for the job
         """
-        stepName = self.step.data._internal_name
         seeding = getattr(self.jobBag, "seeding", None)
-        seedJson = os.path.join(self.stepSpace.location, "reproducible_seed.json") 
+        seedJson = os.path.join(self.stepSpace.location, "reproducible_seed.json")
         self.logger.info("Job seeding set to: %s", seeding)
         procScript = "cmssw_handle_random_seeds.py"
 
@@ -264,12 +272,12 @@ class SetupCMSSWPset(ScriptInterface):
             for x in randService:
                 parameter = "process.RandomNumberGeneratorService.%s.initialSeed" % x._internal_name
                 seedParams[parameter] = x.initialSeed
-            try: 
+            try:
                 with open(seedJson, 'wb') as f:
                     json.dump(seedParams, f)
             except Exception as ex:
                 self.logger.exception("Error writing out process funcArgs json:")
-                raise
+                raise ex
             cmd += " --reproducible_json %s" % (seedJson)
 
         self.scramRun(cmd)
@@ -364,7 +372,7 @@ class SetupCMSSWPset(ScriptInterface):
         self.logger.info("Running on site '%s', local PNN: '%s'", siteConfig.siteName, PhEDExNodeName)
         jsonPileupConfig = os.path.join(self.stepSpace.location, "pileupconf.json")
 
-        # Load pileup json 
+        # Load pileup json
         try:
             with open(jsonPileupConfig) as jdata:
                 pileupDict = json.load(jdata)
@@ -372,7 +380,7 @@ class SetupCMSSWPset(ScriptInterface):
             m = "Could not read pileup JSON configuration file: '%s'" % jsonPileupConfig
             raise RuntimeError(m)
 
-        # Create a json with a list of files and events available 
+        # Create a json with a list of files and events available
         # after dealing with PhEDEx/AAA logic
         newPileupDict = {}
         fileList = []
@@ -394,7 +402,7 @@ class SetupCMSSWPset(ScriptInterface):
                 json.dump(newPileupDict, f)
         except Exception as ex:
             self.logger.exception("Error writing out process filelist json:")
-            raise
+            raise ex
 
         procScript = "cmssw_handle_pileup.py"
         cmd = "%s --input_pkl %s --output_pkl %s --pileup_dict %s" % (
@@ -606,9 +614,9 @@ class SetupCMSSWPset(ScriptInterface):
         """
         if not self.crabPSet:
             return self.step.data.application.setup.cmsswVersion
-        else:
-            # CRAB3 needs to use an environment var to get the version
-            return os.environ.get("CMSSW_VERSION", "")
+
+        # CRAB3 needs to use an environment var to get the version
+        return os.environ.get("CMSSW_VERSION", "")
 
 
     def getScramVersion(self, allSteps=False):
@@ -622,11 +630,11 @@ class SetupCMSSWPset(ScriptInterface):
             if allSteps:
                 return scramArch
             else:
-                if type(scramArch) == list:
+                if isinstance(scramArch, list):
                     return next(iter(scramArch or []), None)
-        else:
-            # CRAB3 needs to use an environment var to get the version
-            return os.environ.get("SCRAM_ARCH", "")
+
+        # CRAB3 needs to use an environment var to get the version
+        return os.environ.get("SCRAM_ARCH", "")
 
 
     def __call__(self):
@@ -638,8 +646,6 @@ class SetupCMSSWPset(ScriptInterface):
         """
         self.logger.info("Executing SetupCMSSWPSet...")
         self.jobBag = self.job.getBaggage()
-        self.logger.info('jobBag = {0}'.format(dir(self.jobBag)))
-        self.logger.info('jobBag useErrorDataset = {0}'.format(getattr(self.jobBag, "useErrorDataset", "Unset")))
         self.configPickle = getattr(self.step.data.application.command, "configurationPickle", "PSet.pkl")
         self.psetFile = getattr(self.step.data.application.command, "configuration", "PSet.py")
         self.scram = self.createScramEnv()
@@ -660,12 +666,12 @@ class SetupCMSSWPset(ScriptInterface):
             except Exception as ex:
                 self.logger.exception("Error creating process for Config/DataProcessing:")
                 raise ex
-            # Now, load the new picked process 
+            # Now, load the new picked process
             try:
                 with open(os.path.join(self.stepSpace.location, self.configPickle), 'rb') as f:
                     self.process = Unpickler(f).load()
             except ImportError as ex:
-                msg = "Unable to import pset from %s:\n" % psetFile
+                msg = "Unable to import pset from %s:\n" % self.psetFile
                 msg += str(ex)
                 self.logger.error(msg)
                 raise ex
@@ -718,7 +724,7 @@ class SetupCMSSWPset(ScriptInterface):
                 self.logger.error("Failed to override numberOfThreads: %s", str(ex))
 
         # Apply task level tweaks
-        taskTweak = makeTaskTweak(self.step.data, self.tweak)
+        makeTaskTweak(self.step.data, self.tweak)
         self.applyPsetTweak(self.tweak, cleanupTweak=True)
 
         # Check if chained processing is enabled
@@ -729,7 +735,7 @@ class SetupCMSSWPset(ScriptInterface):
             self.handleChainedProcessingTweak()
         else:
             self.logger.info("Creating job level tweaks")
-            jobTweak = makeJobTweak(self.job, self.tweak)
+            makeJobTweak(self.job, self.tweak)
         self.applyPsetTweak(self.tweak, cleanupTweak=True)
 
         # check for pileup settings presence, pileup support implementation
@@ -741,9 +747,8 @@ class SetupCMSSWPset(ScriptInterface):
         self.logger.info("Output module section")
         cmsswStep = self.step.getTypeHelper()
         for om in cmsswStep.listOutputModules():
-            self.logger.info("Using output module: {0}".format(om))
             mod = cmsswStep.getOutputModule(om)
-            outTweak = makeOutputTweak(mod, self.job, self.tweak)
+            makeOutputTweak(mod, self.job, self.tweak)
         self.applyPsetTweak(self.tweak, cleanupTweak=True)
 
         # revlimiter for testing

@@ -517,7 +517,7 @@ def makeOutputTweak(outMod, job, result):
     """
     # output filenames
     modName = str(getattr(outMod, "_internal_name"))
-    logging.info("modName = {0}".format(modName))
+    logging.info("modName = %s" % modName)
     fileName = "%s.root" % modName
 
     result.addParameter("process.%s.fileName" % modName, fileName)
@@ -526,10 +526,6 @@ def makeOutputTweak(outMod, job, result):
     if lfnBase != None:
         lfn = "%s/%s/%s.root" % (lfnBase, lfnGroup(job), modName)
         result.addParameter("process.%s.logicalFileName" % modName, lfn)
-
-    # TODO: Nice standard way to meddle with the other parameters in the
-    #      output module based on the settings in the section
-    logging.info("mod result = {0}".format(result.jsondictionary()))
 
     return
 
