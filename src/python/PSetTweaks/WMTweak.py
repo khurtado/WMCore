@@ -497,11 +497,11 @@ def makeJobTweak(job, result):
 
     baggageParams = decomposeConfigSection(procSection)
     for k, v in viewitems(baggageParams):
-        if type(v) == type(''):
+        if isinstance(v, str):
             v =  "customTypeCms.untracked.string(%s)" % v
-        elif type(v) == type(0):
+        elif isinstance(v, int):
             v =  "customTypeCms.untracked.uint32(%s)" % v
-        elif type(v) == type([]):
+        elif isinstance(v, list):
             v =  "customTypeCms.untracked.vstring(%s)" % v
         result.addParameter(k, v)
 
@@ -517,7 +517,7 @@ def makeOutputTweak(outMod, job, result):
     """
     # output filenames
     modName = str(getattr(outMod, "_internal_name"))
-    logging.info("modName = %s" % modName)
+    logging.info("modName = %s", modName)
     fileName = "%s.root" % modName
 
     result.addParameter("process.%s.fileName" % modName, fileName)

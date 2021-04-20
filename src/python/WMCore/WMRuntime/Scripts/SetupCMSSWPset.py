@@ -85,16 +85,16 @@ class SetupCMSSWPset(ScriptInterface):
         self.psetFile = None
 
     def createScramEnv(self):
-        """
-        _createScramEnv_
+        scramArchitecture = self.getScramVersion()
+        cmsswVersion = self.getCmsswVersion()
+        self.logger.info("Creating Scram environment with scram arch: %s and CMSSW version: %s",
+            scramArchitecture,
+            cmsswVersion)
 
-        Create scram environment
-
-        """
         scram = Scram(
-            version=self.getCmsswVersion(),
+            version=cmsswVersion,
             directory=self.stepSpace.location,
-            architecture=self.getScramVersion(),
+            architecture=scramArchitecture,
             initialise=self.step.data.application.setup.softwareEnvironment
         )
         scram.project() # creates project area
