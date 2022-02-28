@@ -113,6 +113,8 @@ class DQMUpload(Executor):
                     # uploading file to the server
                     self.httpPost(os.path.join(stepLocation,
                                                os.path.basename(analysisFile.fileName)))
+                    # Upload to EOS
+                    self.uploadToEOS(analysisFile)
 
             # Am DONE with report
             # Persist it
@@ -293,3 +295,64 @@ class DQMUpload(Executor):
             data = GzipFile(fileobj=BytesIO(data)).read()
 
         return (result.headers, data)
+
+    def uploadToEOS(self, overrides, analysisFile):
+        """
+        :param overrides: dictionary for setting the eos lfn.
+        :return: None
+        """
+        eosStageOutParams = {}
+        eosStageOutParams['command'] = overrides.get('command', "xrdcp")
+        eosStageOutParams['option'] = overrides.get('option', "--wma-disablewriterecovery")
+        eosStageOutParams['phedex-node'] = overrides.get('eos-phedex-node', "T2_CH_CERN")
+        eosStageOutParams['lfn-prefix'] = overrides.get('eos-lfn-prefix',
+                                                         "root://eoscms.cern.ch//eos/cms/store/group/comm_dqm/DQMGUI_data")
+
+        # Switch between old and stageOut manager.
+        # Use old by default
+        useNewStageOutCode = False
+        if 'newStageOut' in overrides and overrides.get('newStageOut'):
+            useNewStageOutCode = True
+
+        if not useNewStageOutCode:
+            # old style
+            eosmanager = StageOutMgr.StageOutMgr(**eosStageOutParams)
+            eosmanager.numberOfRetries = self.step.retryCount
+            eosmanager.retryPauseTime = self.step.retryDelay
+        else:
+            # new style
+            logging.info("DQMUpload is usig new StageOut code for EOS Copy")
+            eosmanager = WMCore.Storage.FileManager.StageOutMgr(
+                    retryPauseTime=self.step.retryDelay,
+                    numberOfRetries=self.step.retryCount,
+                    **eosStageOutParams)
+
+        eosFileInfo = {'LFN': self.getAnalysisFileLFN(analysisFile),
+                       'PFN': analysisFile.fileName,
+                       'PNN': None,
+                       'GUID': None
+                       }
+
+        msg = "Writing DQM root files to CERN EOS with retries: %s and retry pause: %s"
+        logging.info(msg, eosmanager.numberOfRetries, eosmanager.retryPauseTime)
+        try:
+            eosmanager(eosFileInfo)
+        except Alarm:
+            logging.error("Indefinite hangout while staging out to EOS")
+        except Exception as ex:
+            logging.exception("EOS copy failed, lfn: %s. Error: %s", eosFileInfo['LFN'], str(ex))
+
+        return
+
+    def getAnalysisFileLFN(self, analysisFile):
+        """
+        Construct an LFN for an analysisFile
+        """
+    
+        base = os.path.basename(analysisFile.fileName)
+        root, ext = os.path.splitext(base)
+    
+        newBase = '{base}_{count:04d}{ext}'.format(base=root, ext=ext, count=self.job['counter'])
+        lfn = os.path.join(analysisFile.lfnBase, self.job['workflow'], newBase)
+    
+        return lfn

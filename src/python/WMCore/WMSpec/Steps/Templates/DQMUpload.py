@@ -44,7 +44,10 @@ class DQMUpload(Template):
         stepname = nodeName(step)
         step.stepType = "DQMUpload"
         step.section_("upload")
+        step.retryCount = 3
+        step.retryDelay = 300
         step.upload.URL = 'https://cmsweb.cern.ch/dqm/dev'
+        step.upload.RegisterURL = 'https://cmsweb-testbed.cern.ch/dqm/offline-test-new/api/v1/register'
         step.upload.proxy = None
 
     def helper(self, step):
