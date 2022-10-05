@@ -10,8 +10,8 @@ jobs:
   build_and_publish_services:
     strategy:
       matrix:
-        #target: [wmagent, wmagent-devtools, wmcore, reqmon, reqmgr2, reqmgr2ms, global-workqueue, acdcserver]
-        target: [wmcore]
+        #target: [wmagent, wmagent-devtools, wmcore, reqmon, reqmgr2, reqmgr2ms, global-workqueue, acdcserver, t0]
+        target: [wmagent, wmagent-devtools, reqmon, reqmgr2, reqmgr2ms, global-workqueue, acdcserver, t0]
     uses: ./.github/workflows/pypy_build_publish_template.yaml
     with:
       wmcore_component: ${{ matrix.target }}
