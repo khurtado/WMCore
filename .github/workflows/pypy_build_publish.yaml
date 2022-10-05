@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         #target: [wmagent, wmagent-devtools, wmcore, reqmon, reqmgr2, reqmgr2ms, global-workqueue, acdcserver, t0]
-        target: [t0]
+        target: [wmagent, wmagent-devtools]
     uses: ./.github/workflows/pypy_build_publish_template.yaml
     with:
       wmcore_component: ${{ matrix.target }}
