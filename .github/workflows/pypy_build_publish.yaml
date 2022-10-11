@@ -4,7 +4,7 @@
 on:
   push:
     tags:
-      - '*'
+      - '!JENKINS*'
 
 jobs:
   build_and_publish_services:
