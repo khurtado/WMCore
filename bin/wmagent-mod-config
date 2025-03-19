@@ -9,13 +9,9 @@ Copyright (c) 2011 Fermilab. All rights reserved.
 Note: this script is also used by ASO deployment, see:
 https://github.com/dmwm/deployment/blob/master/asyncstageout/manage#L246
 """
-from __future__ import print_function
-from future import standard_library
-standard_library.install_aliases()
-from future.utils import viewitems
 
 import getopt
-import imp
+import importlib
 import os
 import socket
 import sys
@@ -47,8 +43,21 @@ def importConfigTemplate(filename):
     Given filename, load it and grab the configuration object from it
 
     """
-    mod = imp.load_module("wmcore_config_input", open(filename, 'r'), filename, (".py", "r", imp.PY_SOURCE))
-    config = getattr(mod, 'config', None)
+
+    cfgBaseName = os.path.basename(filename).replace(".py", "")
+    cfgDirName = os.path.dirname(filename)
+    if not cfgDirName:
+        modSpecs = importlib.machinery.PathFinder().find_spec(cfgBaseName)
+    else:
+        modSpecs = importlib.machinery.PathFinder().find_spec(cfgBaseName, [cfgDirName])
+    try:
+        modRef = modSpecs.loader.load_module(cfgBaseName)
+    except Exception as ex:
+        msg = "Unable to load Configuration File: %s\n Due to error:\n" % filename
+        msg += str(ex)
+        msg += str(traceback.format_exc())
+        raise RuntimeError(msg)
+    config = getattr(modRef, 'config', None)
     if config is None:
         msg = "No config attribute found in %s" % filename
         raise RuntimeError(msg)
@@ -81,7 +90,7 @@ def modifyConfiguration(config, **args):
         "working_dir": [("General", "workDir")],
     }
 
-    for k, v in viewitems(args):
+    for k, v in args.items():
         parameters = mapping.get(k, [])
         for p in parameters:
             if hasattr(config, p[0]):
@@ -279,6 +288,17 @@ def modifyConfiguration(config, **args):
     if hasattr(config, "ArchiveDataReporter"):
         config.ArchiveDataReporter.WMArchiveURL = args["wmarchive_url"]
 
+    # custom WMArchiveReporter
+    if hasattr(config, "WorkflowUpdater"):
+        config.WorkflowUpdater.dbsUrl = args.get("dbs3_reader_url", None)
+        config.WorkflowUpdater.rucioUrl = args["rucio_host"]
+        config.WorkflowUpdater.rucioAuthUrl = args["rucio_auth"]
+        if args.get("wmstats_url", None):
+            config.WorkflowUpdater.wmstatsUrl = args["wmstats_url"].replace("couchdb/wmstats", "wmstatsserver")
+        if args.get("mspileup_url", None):
+            config.WorkflowUpdater.msPileupUrl = args["mspileup_url"]
+
+
     return config
 
 
@@ -303,10 +323,10 @@ def main(argv=None):
                                          "sb_hostname=", "sb_port=", "sb_basepath=", "ufc_hostname=", "ufc_port=",
                                          "ufc_service_url=", "ufc_cachedir=", "client_mapping=",
                                          "workload_summary_url=", "coredb_url=", "wmstats_url=", "ops_proxy=",
-                                         "reqmgr2_url=", "acdc_url=", "amq_auth_file=", "dbs3_url=",
+                                         "reqmgr2_url=", "acdc_url=", "amq_auth_file=", "dbs3_url=", "dbs3_reader_url=",
                                          "dqm_url=", "grafana_token=", "requestcouch_url=", "central_logdb_url=",
                                          "wmarchive_url=", "amq_credentials=",
-                                         "rucio_account=", "rucio_host=", "rucio_auth="])
+                                         "rucio_account=", "rucio_host=", "rucio_auth=", "mspileup_url="])
 
         except getopt.error as msg:
             raise Usage(msg)
@@ -327,10 +347,10 @@ def main(argv=None):
                           '--ufc_port', '--ufc_service_url', '--ufc_cachedir',
                           '--client_mapping', '--workload_summary_url',
                           '--wmstats_url', '--ops_proxy', '--reqmgr2_url', '--acdc_url',
-                          '--amq_auth_file', '--dbs3_url', '--dqm_url',
+                          '--amq_auth_file', '--dbs3_url', '--dbs3_reader_url', '--dqm_url',
                           '--grafana_token', '--requestcouch_url', '--central_logdb_url',
                           '--wmarchive_url', '--amq_credentials',
-                          '--rucio_account', '--rucio_host', '--rucio_auth'):
+                          '--rucio_account', '--rucio_host', '--rucio_auth', '--mspileup_url'):
                 parameters[option[2:]] = value
 
 

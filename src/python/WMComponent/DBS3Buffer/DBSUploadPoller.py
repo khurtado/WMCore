@@ -40,6 +40,7 @@ import threading
 import time
 
 from dbs.apis.dbsClient import DbsApi
+from RestClient.ErrorHandling.RestClientExceptions import HTTPError
 
 from Utils.Timers import timeFunction
 from WMComponent.DBS3Buffer.DBSBufferBlock import DBSBufferBlock
@@ -48,6 +49,7 @@ from WMCore.Algorithms.MiscAlgos import sortListByKey
 from WMCore.DAOFactory import DAOFactory
 from WMCore.Services.UUIDLib import makeUUID
 from WMCore.Services.WMStatsServer.WMStatsServer import WMStatsServer
+from WMCore.Services.DBS.DBSErrors import DBSError
 from WMCore.WMException import WMException
 from WMCore.WorkerThreads.BaseWorkerThread import BaseWorkerThread
 
@@ -91,25 +93,30 @@ def uploadWorker(workInput, results, dbsUrl, gzipEncoding=False):
             logging.info("About to call insert block for: %s", name)
             dbsApi.insertBulkBlock(blockDump=block)
             results.put({'name': name, 'success': "uploaded"})
-        except Exception as ex:
-            exString = str(getattr(ex, "body", ex))
-            if 'Block %s already exists' % name in exString:
-                # Then this is probably a duplicate
-                # Ignore this for now
+        except HTTPError as ex:
+            # DBS Go server errors are defined here:
+            # https://github.com/dmwm/dbs2go/blob/master/dbs/errors.go
+            dbsError = DBSError(ex.body)
+            reason = dbsError.getReason()
+            message = dbsError.getMessage()
+            srvCode = dbsError.getServerCode()
+            msg = f'DBSError code: {srvCode}, message: {message}, reason: {reason}'
+            if srvCode == 128:
+                # block already exist
                 logging.warning("Block %s already exists. Marking it as uploaded.", name)
-                logging.debug("Exception: %s", exString)
-                results.put({'name': name, 'success': "uploaded"})
-            elif 'Missing data when inserting to dataset_parents' in exString:
-                msg = "Parent dataset is not inserted yet for block %s." % name
-                logging.warning(msg)
+                results.put({'name': name, 'success': "check"})
+            elif srvCode in [132, 133, 134, 135, 136, 137, 138, 139, 140]:
+                # racing conditions
+                logging.warning("Hit a transient data race condition injecting block %s, %s", name, msg)
                 results.put({'name': name, 'success': "error", 'error': msg})
             else:
-                reason = parseDBSException(exString)
-                msg = "Error trying to process block %s through DBS. Error: %s" % (name, reason)
-                logging.exception(msg)
-                logging.debug("block info: %s \n", block)
+                msg = f"Error trying to process block {name} through DBS. Details: {msg}"
+                logging.error(msg)
                 results.put({'name': name, 'success': "error", 'error': msg})
-
+        except Exception as ex:
+            msg = f"Hit a general exception while inserting block {name}. Error: {str(ex)}"
+            logging.exception(msg)
+            results.put({'name': name, 'success': "error", 'error': msg})
     return
 
 
@@ -126,31 +133,6 @@ def parseDBSException(exBodyString):
         return data[0]['error']['reason']
     except:
         return exBodyString
-
-
-def isPassiveError(exceptionObj):
-    """
-    This function will parse the exception object and report whether
-    the error message corresponds to a soft or hard error (hard errors
-    are supposed to let the component crash).
-    :param exceptionObj: any exception object
-    :return: True if it's a soft error, False otherwise
-    """
-    passException = True
-    passiveErrorMsg = ['Service Unavailable', 'Service Temporarily Unavailable',
-                       'Proxy Error', 'Error reading from remote server',
-                       'Connection refused', 'timed out', 'Could not resolve',
-                       'OpenSSL SSL_connect: SSL_ERROR_SYSCALL']
-
-    excReason = getattr(exceptionObj, 'reason', '')
-    for passiveMsg in passiveErrorMsg:
-        if passiveMsg in excReason:
-            break
-        elif passiveMsg in str(exceptionObj):
-            break
-    else:
-        passException = False
-    return passException
 
 
 class DBSUploadException(WMException):
@@ -207,6 +189,10 @@ class DBSUploadPoller(BaseWorkerThread):
         self.physicsGroup = getattr(self.config.DBS3Upload, "physicsGroup", "NoGroup")
         self.datasetType = getattr(self.config.DBS3Upload, "datasetType", "PRODUCTION")
         self.primaryDatasetType = getattr(self.config.DBS3Upload, "primaryDatasetType", "mc")
+        self.uploaderName = getattr(self.config.DBS3Upload, "uploaderName", "WMAgent")
+        if self.uploaderName not in ("WMAgent", "T0Prod", "T0Replay"):
+            raise DBSUploadException(f"Invalid value for attribute uploaderName: {self.uploaderName}")
+
         self.blockCount = 0
         self.gzipEncoding = getattr(self.config.DBS3Upload, 'gzipEncoding', False)
         self.dbsApi = DbsApi(url=self.dbsUrl)
@@ -222,7 +208,7 @@ class DBSUploadPoller(BaseWorkerThread):
 
         self.filesToUpdate = []
 
-        self.produceCopy = getattr(self.config.DBS3Upload, 'dumpBlock', False)
+        self.dumpBlockJsonFor = getattr(self.config.DBS3Upload, 'dumpBlockJsonFor', "")
 
         self.copyPath = os.path.join(getattr(self.config.DBS3Upload, 'componentDir', '/data/srv/'),
                                      'dbsuploader_block.json')
@@ -357,17 +343,12 @@ class DBSUploadPoller(BaseWorkerThread):
         try:
             self.datasetParentageCache = self.wmstatsServerSvc.getChildParentDatasetMap()
         except Exception as ex:
+            success = False
             excReason = getattr(ex, 'reason', '')
             errorMsg = 'Failed to fetch parentage map from WMStats, skipping this cycle. '
-            errorMsg += 'Exception: {}. Reason: {}. Error: {}. '.format(type(ex).__name__,
-                                                                        excReason, str(ex))
-            if isPassiveError(ex):
-                logging.warning(errorMsg)
-            else:
-                errorMsg += 'Hit a terminal exception in DBSUploadPoller.'
-                raise DBSUploadException(errorMsg) from None
+            errorMsg += 'Reason: {}. Error: {}. '.format(excReason, str(ex))
+            logging.error(errorMsg)
             myThread.logdbClient.post("DBS3Upload_parentMap", errorMsg, "warning")
-            success = False
         else:
             myThread.logdbClient.delete("DBS3Upload_parentMap", "warning", this_thread=True)
 
@@ -379,6 +360,7 @@ class DBSUploadPoller(BaseWorkerThread):
 
         Find all blocks; make sure they're in the cache
         """
+        logging.info("Executing loadBlocks method...")
         openBlocks = self.dbsUtil.findOpenBlocks()
         logging.info("Found %d open blocks.", len(openBlocks))
         logging.debug("These are the openblocks: %s", openBlocks)
@@ -391,6 +373,7 @@ class DBSUploadPoller(BaseWorkerThread):
 
         # Now load the blocks
         try:
+            logging.info("Now loading %d open blocks not yet cached...", len(blocksToLoad))
             loadedBlocks = self.dbsUtil.loadBlocks(blocksToLoad)
             logging.info("Loaded %d blocks from the database.", len(loadedBlocks))
         except WMException:
@@ -403,9 +386,11 @@ class DBSUploadPoller(BaseWorkerThread):
             raise DBSUploadException(msg) from None
 
         for blockInfo in loadedBlocks:
+            logging.info("Creating DBSBufferBlock object for: %s", blockInfo['block_name'])
             block = DBSBufferBlock(name=blockInfo['block_name'],
                                    location=blockInfo['origin_site_name'],
-                                   datasetpath=blockInfo['datasetpath'])
+                                   datasetpath=blockInfo['datasetpath'],
+                                   uploader=self.uploaderName)
 
             parent = self.datasetParentageCache.get(blockInfo['datasetpath'])
             if parent:
@@ -446,6 +431,7 @@ class DBSUploadPoller(BaseWorkerThread):
         Load all files that need to be loaded.  I will do this by DatasetPath
         to break the monstrous calls down into smaller chunks.
         """
+        logging.info("Executing loadFiles method...")
         dspList = self.dbsUtil.findUploadableDAS()
 
         readyBlocks = []
@@ -515,6 +501,7 @@ class DBSUploadPoller(BaseWorkerThread):
 
         Mark Open blocks as Pending if they have timed out or their workflows have completed
         """
+        logging.info("Executing checkBlockCompletion method...")
         completedWorkflows = self.dbsUtil.getCompletedWorkflows()
         for block in viewvalues(self.blockCache):
             if block.status == "Open":
@@ -575,7 +562,8 @@ class DBSUploadPoller(BaseWorkerThread):
         blockname = "%s#%s" % (datasetpath, makeUUID())
         newBlock = DBSBufferBlock(name=blockname,
                                   location=location,
-                                  datasetpath=datasetpath)
+                                  datasetpath=datasetpath,
+                                  uploader=self.uploaderName)
         # Now we load the dataset information
         self.setDatasetInfo(newBlock)
 
@@ -623,6 +611,7 @@ class DBSUploadPoller(BaseWorkerThread):
          Open, in DBSBuffer - Newly created block that has already been
            written to DBSBuffer.  We don't have to do anything with it.
         """
+        logging.info("Executing inputBlocks method...")
         if not self.blockCache:
             return
 
@@ -655,10 +644,12 @@ class DBSUploadPoller(BaseWorkerThread):
             try:
                 myThread.transaction.begin()
                 if createInDBSBuffer:
+                    logging.info("Creating %d new blocks in DBSBuffer", len(createInDBSBuffer))
                     self.createBlocksDAO.execute(blocks=createInDBSBuffer,
                                                  conn=myThread.transaction.conn,
                                                  transaction=True)
                 if updateInDBSBuffer:
+                    logging.info("Updating %d blocks in DBSBuffer", len(updateInDBSBuffer))
                     self.updateBlocksDAO.execute(blocks=updateInDBSBuffer,
                                                  conn=myThread.transaction.conn,
                                                  transaction=True)
@@ -685,6 +676,7 @@ class DBSUploadPoller(BaseWorkerThread):
         if self.filesToUpdate:
             try:
                 myThread.transaction.begin()
+                logging.info("Associating %d files to blocks in DBSBuffer", len(self.filesToUpdate))
                 self.setBlockFilesDAO.execute(binds=self.filesToUpdate,
                                               conn=myThread.transaction.conn,
                                               transaction=True)
@@ -724,7 +716,8 @@ class DBSUploadPoller(BaseWorkerThread):
             logging.info("Queueing block for insertion: %s", block.getName())
             self.workInput.put({'name': block.getName(), 'block': encodedBlock})
             self.blockCount += 1
-            if self.produceCopy:
+            if self.dumpBlockJsonFor and (self.dumpBlockJsonFor == block.getName()):
+                logging.info("Dumping '%s' information into %s", block.getName(), self.copyPath)
                 with open(self.copyPath, 'w') as jo:
                     json.dump(encodedBlock, jo, indent=2)
             self.queuedBlocks.append(block.getName())
@@ -742,6 +735,7 @@ class DBSUploadPoller(BaseWorkerThread):
 
         To do this, the result queue needs to pass back the blockname
         """
+        logging.info("Executing retrieveBlocks method...")
         myThread = threading.currentThread()
 
         blocksToClose = []
@@ -788,18 +782,15 @@ class DBSUploadPoller(BaseWorkerThread):
             elif result["success"] == "check":
                 block = result["name"]
                 self.blocksToCheck.append(block)
-            else:
-                logging.error("Error found in multiprocess during process of block %s", result.get('name'))
-                logging.error(result['error'])
-                # Continue to the next block
-                # Block will remain in pending status until it is transferred
 
         if loadedBlocks:
             try:
+                logging.info("Updating database record with files injected into DBS")
                 myThread.transaction.begin()
                 self.updateFilesDAO.execute(blocks=loadedBlocks, status="InDBS",
                                             conn=myThread.transaction.conn,
                                             transaction=True)
+                logging.info("Updating %d blocks successfully injected into DBS", len(loadedBlocks))
                 self.updateBlocksDAO.execute(blocks=loadedBlocks,
                                              conn=myThread.transaction.conn,
                                              transaction=True)
@@ -848,6 +839,7 @@ class DBSUploadPoller(BaseWorkerThread):
         Check with DBS3 if the blocks marked as check are
         uploaded or not.
         """
+        logging.info("Checking for blocks potentially uploaded but not marked as such in the database.")
         myThread = threading.currentThread()
 
         blocksUploaded = []
@@ -857,12 +849,14 @@ class DBSUploadPoller(BaseWorkerThread):
             logging.debug("Checking block existence: %s", block)
             # Check in DBS if the block was really inserted
             try:
+                # FIXME: is it still an empty list for blocks not available?
                 result = self.dbsApi.listBlocks(block_name=block)
                 # it is an empty list if block cannot be found
                 if result:
                     loadedBlock = self.blockCache.get(block)
                     loadedBlock.status = 'InDBS'
                     blocksUploaded.append(loadedBlock)
+                    logging.info("Block '%s' will be marked as '%s'", block, loadedBlock.status)
             except Exception as ex:
                 msg = "Error trying to check block %s through DBS. Error: %s" % (block, str(ex))
                 logging.exception(msg)
@@ -870,6 +864,7 @@ class DBSUploadPoller(BaseWorkerThread):
         # Update the status of those blocks that were truly inserted
         if blocksUploaded:
             try:
+                logging.info("Marking bulk of blocks as 'InDBS'")
                 myThread.transaction.begin()
                 self.updateBlocksDAO.execute(blocks=blocksUploaded,
                                              conn=myThread.transaction.conn,
@@ -889,6 +884,8 @@ class DBSUploadPoller(BaseWorkerThread):
                 raise DBSUploadException(msg) from None
             else:
                 myThread.transaction.commit()
+                logging.info("A total of %d blocks have been successfully updated to 'InDBS'",
+                             len(blocksUploaded))
 
         for block in blocksUploaded:
             # Clean things up

@@ -11,9 +11,11 @@ import os
 import socket
 import subprocess
 import sys
+import time
+from resource import getrusage, RUSAGE_SELF, RUSAGE_CHILDREN
 
 from Utils.PythonVersion import PY3
-from Utils.Utilities import encodeUnicodeToBytesConditional
+from Utils.Utilities import encodeUnicodeToBytesConditional, decodeBytesToUnicodeConditional
 from WMCore.FwkJobReport.Report import addAttributesToFile
 from WMCore.WMExceptions import WM_JOB_ERROR_CODES
 from WMCore.WMRuntime.Tools.Scram import Scram
@@ -50,14 +52,18 @@ class CMSSW(Executor):
         self.failedPreviousStep = None
 
     def _setStatus(self, returnCode, returnMessage):
-        """
-        Set return code.
-        """
-        self.setCondorChirpAttrDelayed('Chirp_WMCore_cmsRun_ExitCode', returnCode)
+        """Chirp Job/step exit code through HTCondor"""
+        # we will set Chirp_WMCore_cmsRun_ExitCode codes only if previous step was clean
+        if not self.failedPreviousStep:
+            self.setCondorChirpAttrDelayed('Chirp_WMCore_cmsRun_ExitCode', returnCode)
+            logging.info("Step %s: Chirp_WMCore_cmsRun_ExitCode %s", self.stepName, returnCode)
+            if returnMessage and returnCode != 0:
+                self.setCondorChirpAttrDelayed('Chirp_WMCore_cmsRun_Exception_Message', returnMessage, compress=True)
         self.setCondorChirpAttrDelayed('Chirp_WMCore_%s_ExitCode' % self.stepName, returnCode)
+        logging.info("Step %s: Chirp_WMCore_%s_ExitCode %s", self.stepName, self.stepName, returnCode)
         if returnMessage and returnCode != 0:
-            self.setCondorChirpAttrDelayed('Chirp_WMCore_cmsRun_Exception_Message', returnMessage, compress=True)
             self.setCondorChirpAttrDelayed('Chirp_WMCore_%s_Exception_Message' % self.stepName, returnMessage, compress=True)
+
         self.step.execution.exitStatus = returnCode
 
     def pre(self, emulator=None):
@@ -165,7 +171,7 @@ class CMSSW(Executor):
             architecture=scramArch,
         )
 
-        logging.info("Runing SCRAM")
+        logging.info("Running SCRAM")
         try:
             projectOutcome = scram.project()
         except Exception as ex:
@@ -206,6 +212,9 @@ class CMSSW(Executor):
             logging.info("    Invoking command:\n%s", invokeCommand)
             scriptProcess.stdin.write(encodeUnicodeToBytesConditional(invokeCommand, condition=PY3))
             stdout, stderr = scriptProcess.communicate()
+            stdout = decodeBytesToUnicodeConditional(stdout, condition=PY3)
+            stderr = decodeBytesToUnicodeConditional(stderr, condition=PY3)
+            logging.info("stdout: %s\nstderr: %s", stdout, stderr)
             retCode = scriptProcess.returncode
             if retCode > 0:
                 msg = "Error running command\n%s\n" % invokeCommand
@@ -239,9 +248,6 @@ class CMSSW(Executor):
         # spawn this new process
         # the script looks for:
         # <SCRAM_COMMAND> <SCRAM_PROJECT> <CMSSW_VERSION> <JOB_REPORT> <EXECUTABLE> <CONFIG>
-        # open the output files
-        stdoutHandle = open(self.step.output.stdout, 'w')
-        stderrHandle = open(self.step.output.stderr, 'w')
         args = ['/bin/bash',
                 configPath,
                 scramSetup,
@@ -269,7 +275,26 @@ class CMSSW(Executor):
 
         os.environ.update(envOverride)
 
-        returnCode = subprocess.call(args, stdout=stdoutHandle, stderr=stderrHandle)
+        # take snapshot of user and sys time before we call subprocess
+        startTime = time.time()
+        userTime0 = getrusage(RUSAGE_CHILDREN).ru_utime
+        sysTime0 = getrusage(RUSAGE_CHILDREN).ru_stime
+        returnCode = 1  # by default we assume process may fail
+        with open(self.step.output.stdout, 'w') as stdoutHandle, open(self.step.output.stderr, 'w') as stderrHandle:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            childPid, exitStatus, resource = os.wait4(proc.pid, os.P_PID)
+            stdout, stderr = proc.communicate()
+            stdout = decodeBytesToUnicodeConditional(stdout, condition=PY3)
+            stderr = decodeBytesToUnicodeConditional(stderr, condition=PY3)            
+            stdoutHandle.write(stdout)
+            stderrHandle.write(stderr)
+            returnCode = proc.returncode
+
+        # calculate user and sys time of subprocess by substructing relevant
+        # parts take before we spawn the subprocess
+        userTime = getrusage(RUSAGE_CHILDREN).ru_utime - userTime0
+        sysTime = getrusage(RUSAGE_CHILDREN).ru_stime - sysTime0
+        endTime = time.time()
         returnMessage = None
 
         # Return PYTHONPATH to its original value, as this
@@ -277,6 +302,12 @@ class CMSSW(Executor):
         # are able to find WMCore modules
         envOverride['PYTHONPATH'] = pythonPath
         os.environ.update(envOverride)
+
+        try:
+            # Update the job report with the relevant WMCMSSWSubprocess metrics
+            self.report.updateSubprocessInfo(sysTime, userTime, startTime, endTime)
+        except Exception as ex:
+            logging.error("Error updating job report with WMCMSSWSubprocess metrics: %s", str(ex))
 
         if returnCode != 0:
             argsDump = {'arguments': args}
@@ -296,10 +327,8 @@ class CMSSW(Executor):
         else:
             self._setStatus(returnCode, returnMessage)
 
-        stdoutHandle.close()
-        stderrHandle.close()
-
         try:
+            # parse job report XML
             self.report.parse(jobReportXML, stepName=self.stepName)
         except Exception as ex:
             msg = WM_JOB_ERROR_CODES[50115]

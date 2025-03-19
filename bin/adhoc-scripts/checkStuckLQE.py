@@ -8,10 +8,9 @@ Provided a workflow name in the command line, it will find all the
 local workqueue elements and print a summary of work/data location
 for the elements sitting in the Available status
 """
-from __future__ import print_function, division
+
 
 from builtins import next
-from future.utils import viewvalues, listvalues
 
 import sys
 import os
@@ -58,14 +57,14 @@ def commonDataLocation(element):
     """
     commonLoc = set()
     if element['PileupData']:
-        commonLoc = set(next(iter(viewvalues(element['PileupData']))))
+        commonLoc = set(next(iter(element['PileupData'].values())))
     if element['Inputs']:
         if commonLoc:
-            commonLoc = commonLoc & set(next(iter(viewvalues(element['Inputs']))))
+            commonLoc = commonLoc & set(next(iter(element['Inputs'].values())))
         else:
             commonLoc = set(list(element['Inputs'].values())[0])
     if element['ParentData']:
-        tempLoc = listvalues(element['ParentData'])
+        tempLoc = list(element['ParentData'].values())
         parentLoc = set(tempLoc[0])
         for temp in tempLoc:
             parentLoc = parentLoc & set(temp)
@@ -73,10 +72,8 @@ def commonDataLocation(element):
     return commonLoc
 
 def main():
-    if 'WMAGENT_CONFIG' not in os.environ:
-        os.environ['WMAGENT_CONFIG'] = '/data/srv/wmagent/current/config/wmagent/config.py'
-    config = loadConfigurationFile(os.environ["WMAGENT_CONFIG"])
-
+    config = loadConfigurationFile(os.environ.get('WMA_CONFIG_FILE', '/data/srv/wmagent/current/config/config.py')) 
+    
     if len(sys.argv) != 2:
         print("You must provide a request name")
         sys.exit(1)

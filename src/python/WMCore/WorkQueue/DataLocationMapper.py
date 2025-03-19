@@ -12,11 +12,11 @@ import logging
 from urllib.parse import urlparse
 
 from WMCore.Services.DBS.DBSReader import DBSReader
+from WMCore.Services.MSUtils.MSUtils import getPileupDocs
 from WMCore.WorkQueue.DataStructs.ACDCBlock import ACDCBlock
 
 # TODO: Combine with existing dls so DBSreader can do this kind of thing transparently
 # TODO: Known Issue: Can't have same item in multiple dbs's at the same time.
-
 
 
 def isGlobalDBS(dbs):
@@ -52,6 +52,7 @@ class DataLocationMapper(object):
         self.params.setdefault('incompleteBlocks', False)
         self.params.setdefault('requireBlocksSubscribed', True)
         self.params.setdefault('rucioAccount', "wmcore_transferor")
+        self.params.setdefault('rucioAccountPU', "wmcore_pileup")
 
         validLocationFrom = ('subscription', 'location')
         if self.params['locationFrom'] not in validLocationFrom:
@@ -67,34 +68,38 @@ class DataLocationMapper(object):
         # the same object is not shared amongst multiple threads
         self.dbses = {}
 
-    def __call__(self, dataItems):
+    def __call__(self, dataItems, rucioAcct=None):
+        rucioAcct = rucioAcct or self.params['rucioAccount']
         result = {}
 
         dataByDbs = self.organiseByDbs(dataItems)
 
         for dbs, dataItems in viewitems(dataByDbs):
             # if global use Rucio, else use dbs
-            if isGlobalDBS(dbs):
-                output = self.locationsFromRucio(dataItems)
+            if "pileup" in rucioAcct:
+                output = self.locationsFromMSPileup(dataItems, dbs.dbsURL)
+            elif isGlobalDBS(dbs):
+                output = self.locationsFromRucio(dataItems, rucioAcct)
             else:
                 output = self.locationsFromDBS(dbs, dataItems)
             result[dbs] = output
 
         return result
 
-    def locationsFromRucio(self, dataItems):
+    def locationsFromRucio(self, dataItems, rucioAcct):
         """
         Get data location from Rucio. Location is mapped to the actual
         sites associated with them, so PSNs are actually returned
         :param dataItems: list of datasets/blocks names
+        :param rucioAcct: string with the Rucio account name to check the rules against
         :return: dictionary key'ed by the dataset/block, with a list of PSNs as value
         """
         result = defaultdict(set)
-        self.logger.info("Fetching location from Rucio...")
+        self.logger.info("Fetching location from Rucio for account: %s", rucioAcct)
         for dataItem in dataItems:
             try:
                 dataLocations = self.rucio.getDataLockedAndAvailable(name=dataItem,
-                                                                     account=self.params['rucioAccount'])
+                                                                     account=rucioAcct)
                 # resolve the PNNs into PSNs
                 result[dataItem] = self.cric.PNNstoPSNs(dataLocations)
             except Exception as ex:
@@ -120,6 +125,35 @@ class DataLocationMapper(object):
             psns = set()
             psns.update(self.cric.PNNstoPSNs(nodes))
             result[name] = list(psns)
+
+        return result
+
+    def locationsFromMSPileup(self, dataItems, dbsUrl):
+        """
+        Get data location from MSPileup.
+
+        :param dataItems: list, list of pileup names to query
+        :param dbsUrl: str, dbs url to check which dbs server
+        :return: dict, dict of pileup name keys with location set values
+        """
+        self.logger.info(f'Fetching locations from MSPileup for {len(dataItems)} containers')
+
+        result = defaultdict(set)
+        # TODO: Fetch multiple pileups in single request
+        for dataItem in dataItems:
+            try:
+                queryDict = {'query': {'pileupName': dataItem},
+                             'filters': ['currentRSEs', 'pileupName', 'containerFraction', 'ruleIds']}
+                pileupInstance = '-testbed' if 'cmsweb-testbed' in dbsUrl else '-prod'
+                msPileupUrl = f"https://cmsweb{pileupInstance}.cern.ch/ms-pileup/data/pileup"
+                doc = getPileupDocs(msPileupUrl, queryDict, method='POST')[0]
+                self.logger.info(f'locationsFromPileup - name: {dataItem}, currentRSEs: {doc["currentRSEs"]}, containerFraction: {doc["containerFraction"]}')
+                # resolve PNNs into PSNs
+                result[dataItem] = self.cric.PNNstoPSNs(doc['currentRSEs'])
+            except IndexError:
+                self.logger.error('Did not find any pileup document for query: %s', queryDict['query'])
+            except Exception as ex:
+                self.logger.error('Error getting block location from MSPileup for %s: %s', dataItem, str(ex))
 
         return result
 
@@ -207,7 +241,7 @@ class WorkQueueDataLocationMapper(DataLocationMapper):
         dataItems = self.backend.getActivePileupData()
 
         # fullResync incorrect with multiple dbs's - fix!!!
-        dataLocations = DataLocationMapper.__call__(self, dataItems)
+        dataLocations = DataLocationMapper.__call__(self, dataItems, self.params['rucioAccountPU'])
         self.logger.info("Found %d unique pileup data to update location", len(dataItems))
 
         # Given that there might be multiple data items to be updated
@@ -216,6 +250,7 @@ class WorkQueueDataLocationMapper(DataLocationMapper):
         for dataMapping in listvalues(dataLocations):
             for data, locations in viewitems(dataMapping):
                 elements = self.backend.getElementsForPileupData(data)
+                self.logger.info("Found %d elements using pileup: %s", len(elements), data)
                 for element in elements:
                     if element.get('NoPileupUpdate', False):
                         continue

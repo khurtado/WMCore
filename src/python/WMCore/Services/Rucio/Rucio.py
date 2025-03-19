@@ -10,14 +10,16 @@ from __future__ import division, print_function, absolute_import
 from builtins import str, object
 from future.utils import viewitems, viewvalues
 
+from copy import deepcopy
 import json
 import logging
-from copy import deepcopy
+
 from rucio.client import Client
 from rucio.common.exception import (AccountNotFound, DataIdentifierNotFound, AccessDenied, DuplicateRule,
                                     DataIdentifierAlreadyExists, DuplicateContent, InvalidRSEExpression,
-                                    UnsupportedOperation, FileAlreadyExists, RuleNotFound, RSENotFound)
+                                    UnsupportedOperation, FileAlreadyExists, RuleNotFound, RSENotFound, RuleReplaceFailed)
 from Utils.MemoryCache import MemoryCache
+from Utils.IteratorTools import grouper
 from WMCore.Services.Rucio.RucioUtils import (validateMetaData, weightedChoice,
                                               isTapeRSE, dropTapeRSEs)
 from WMCore.WMException import WMException
@@ -52,7 +54,7 @@ class Rucio(object):
     We will try to use Container -> CMS dataset, block -> CMS block.
     """
 
-    def __init__(self, acct, hostUrl=None, authUrl=None, configDict=None):
+    def __init__(self, acct, hostUrl=None, authUrl=None, configDict=None, client=None):
         """
         Constructs a Rucio object with the Client object embedded.
         In order to instantiate a Rucio Client object, it assumes the host has
@@ -62,6 +64,7 @@ class Rucio(object):
         :param hostUrl: defaults to the rucio config one
         :param authUrl: defaults to the rucio config one
         :param configDict: dictionary with extra parameters
+        :param client: optional Rucio client to use (useful for mock-up)
         """
         configDict = configDict or {}
         # default RSE data caching to 12h
@@ -79,15 +82,18 @@ class Rucio(object):
         self.rucioParams.setdefault('user_agent', 'wmcore-client')
 
         self.logger.info("WMCore Rucio initialization parameters: %s", self.rucioParams)
-        self.cli = Client(rucio_host=hostUrl, auth_host=authUrl, account=acct,
-                          ca_cert=self.rucioParams['ca_cert'], auth_type=self.rucioParams['auth_type'],
-                          creds=self.rucioParams['creds'], timeout=self.rucioParams['timeout'],
-                          user_agent=self.rucioParams['user_agent'])
-        clientParams = {}
-        for k in ("host", "auth_host", "auth_type", "account", "user_agent",
-                  "ca_cert", "creds", "timeout", "request_retries"):
-            clientParams[k] = getattr(self.cli, k)
-        self.logger.info("Rucio client initialization parameters: %s", clientParams)
+        if client:
+            self.cli = client
+        else:
+            self.cli = Client(rucio_host=hostUrl, auth_host=authUrl, account=acct,
+                              ca_cert=self.rucioParams['ca_cert'], auth_type=self.rucioParams['auth_type'],
+                              creds=self.rucioParams['creds'], timeout=self.rucioParams['timeout'],
+                              user_agent=self.rucioParams['user_agent'])
+            clientParams = {}
+            for k in ("host", "auth_host", "auth_type", "account", "user_agent",
+                      "ca_cert", "creds", "timeout", "request_retries"):
+                clientParams[k] = getattr(self.cli, k)
+            self.logger.info("Rucio client initialization parameters: %s", clientParams)
 
         # keep a map of rse expression to RSE names mapped for some time
         self.cachedRSEs = MemoryCache(rseCacheExpiration, {})
@@ -148,7 +154,7 @@ class Rucio(object):
         :return: a list of dictionaries with the account usage information.
           None in case of failure
         """
-        res = None
+        res = []
         try:
             res = list(self.cli.get_local_account_usage(acct, rse=rse))
         except (AccountNotFound, AccessDenied) as ex:
@@ -165,7 +171,7 @@ class Rucio(object):
         :return: a list of block names
         """
         blockNames = []
-        if not self.isContainer(container):
+        if not self.isContainer(container, scope=scope):
             # input container wasn't really a container
             self.logger.warning("Provided DID name is not a CONTAINER type: %s", container)
             return blockNames
@@ -217,7 +223,7 @@ class Rucio(object):
                 for item in self.cli.list_dataset_replicas(kwargs["scope"], did["name"], deep=kwargs['deep']):
                     resultDict.setdefault(item['name'], [])
                     if item['state'].upper() == 'AVAILABLE':
-                        resultDict[item['name']].append(item['rse'])            
+                        resultDict[item['name']].append(item['rse'])
         else:
             for item in self.cli.list_dataset_replicas_bulk(inputDids):
                 resultDict.setdefault(item['name'], [])
@@ -240,7 +246,7 @@ class Rucio(object):
         See here for documentation of the upstream Rucio API: https://rucio.readthedocs.io/en/latest/api/rse.html
         :param site: a Rucio RSE, i.e. a site name in standard CMS format like 'T1_UK_RAL_Disk' or  'T2_CH_CERN'
         :param lfns: one LFN or a list of LFN's, does not need to correspond to actual files and could be a top level directory
-                      like ['/store/user/rucio/jdoe','/store/data',...] or the simple '/store/data' 
+                      like ['/store/user/rucio/jdoe','/store/data',...] or the simple '/store/data'
         :param protocol: If the RSE supports multiple access protocols, a preferred protocol can be selected via this,
                          otherwise the default one for the site will be selected. Example: 'gsiftp' or 'davs'
                          this is what is called "scheme" in the RUCIO API (we think protocol is more clear)
@@ -342,7 +348,7 @@ class Rucio(object):
             response = self.attachDIDs(kwargs.get('rse'), container, name, scope)
         return response
 
-    def attachDIDs(self, rse, superDID, dids, scope='cms'):
+    def attachDIDs(self, rse, superDID, dids, scope='cms', chunkSize=1000):
         """
         _attachDIDs_
 
@@ -352,26 +358,38 @@ class Rucio(object):
              then it's a container name; if attaching files, then it's a block name)
         :param dids: either a string or a list of data identifiers (can be block or files)
         :param scope: string with the scope name
+        :param chunkSize: maximum number of dids to be attached in any single Rucio server call
         :return: a boolean to represent whether it succeeded or not
         """
         if not isinstance(dids, list):
             dids = [dids]
-        dids = [{'scope': scope, 'name': did} for did in dids]
+        # NOTE: the attaching dids do not create new container within a scope
+        # and it is safe to use cms scope for it
+        alldids = [{'scope': 'cms', 'name': did} for did in sorted(dids)]
 
-        response = False
-        try:
-            response = self.cli.attach_dids(scope, superDID, dids=dids, rse=rse)
-        except DuplicateContent:
-            self.logger.warning("Dids: %s already attached to: %s", dids, superDID)
-            response = True
-        except FileAlreadyExists:
-            self.logger.warning("Failed to attach files already existent on block: %s", superDID)
-            response = True
-        except DataIdentifierNotFound:
-            self.logger.error("Failed to attach dids: %s. Parent DID %s does not exist.", dids, superDID)
-        except Exception as ex:
-            self.logger.error("Exception attaching dids: %s to: %s. Error: %s",
-                              dids, superDID, str(ex))
+        # report if we use chunk size in rucio attach_dids API call
+        if len(alldids) > chunkSize:
+            self.logger.info("Attaching a total of %d DIDs in chunk size of: %d", len(alldids), chunkSize)
+
+        for dids in grouper(alldids, chunkSize):
+            response = False
+            try:
+                response = self.cli.attach_dids(scope, superDID, dids=dids, rse=rse)
+            except DuplicateContent:
+                self.logger.warning("Dids: %s already attached to: %s", dids, superDID)
+                response = True
+            except FileAlreadyExists:
+                self.logger.warning("Failed to attach files already existent on block: %s", superDID)
+                response = True
+            except DataIdentifierNotFound:
+                self.logger.error("Failed to attach dids: %s. Parent DID %s does not exist.", dids, superDID)
+            except Exception as ex:
+                self.logger.error("Exception attaching %s dids to: %s. Error: %s. First 10 dids: %s",
+                                  len(dids), superDID, str(ex), dids[:10])
+            if not response:
+                # if we had failure with specific chunk of dids we'll return immediately
+                return response
+
         return response
 
     def createReplicas(self, rse, files, block, scope='cms', ignoreAvailability=True):
@@ -436,6 +454,30 @@ class Rucio(object):
         except Exception as ex:
             self.logger.error("Exception closing container/block: %s. Error: %s", name, str(ex))
         return response
+
+    def moveReplicationRule(self, ruleId, rseExpression, account):
+        """
+        Perform move operation for provided rule id and rse expression
+        :param ruleId: rule id
+        :param rseExpression: rse expression
+        :param account: rucio quota account
+        :return: it returns either an empty list or a list with a string id for the rule created
+        Please note, we made return type from this wrapper compatible with createReplicateRule
+        """
+        ruleIds = []
+        try:
+            rid = self.cli.move_replication_rule(ruleId, rseExpression, account)
+            ruleIds.append(rid)
+        except RuleNotFound as ex:
+            msg = "RuleNotFound move DID replication rule. Error: %s" % str(ex)
+            raise WMRucioException(msg) from ex
+        except RuleReplaceFailed as ex:
+            msg = "RuleReplaceFailed move DID replication rule. Error: %s" % str(ex)
+            raise WMRucioException(msg) from ex
+        except Exception as ex:
+            msg = "Unsupported exception from Rucio API. Error: %s" % str(ex)
+            raise WMRucioException(msg) from ex
+        return ruleIds
 
     def createReplicationRule(self, names, rseExpression, scope='cms', copies=1, **kwargs):
         """
@@ -642,23 +684,38 @@ class Rucio(object):
             self.logger.error("Exception listing parent DIDs for data: %s. Error: %s", name, str(ex))
         return list(res)
 
-    def getRule(self, ruleId, estimatedTtc=False):
+    def getRule(self, ruleId):
         """
         _getRule_
 
         Retrieve rule information for a given rule id
         :param ruleId: string with the rule id
-        :param estimatedTtc: bool, if rule_info should return ttc information
         :return: a dictionary with the rule data (or empty if no rule can be found)
         """
         res = {}
         try:
-            res = self.cli.get_replication_rule(ruleId, estimate_ttc=estimatedTtc)
+            res = self.cli.get_replication_rule(ruleId)
         except RuleNotFound:
             self.logger.error("Cannot find any information for rule id: %s", ruleId)
         except Exception as ex:
             self.logger.error("Exception getting rule id: %s. Error: %s", ruleId, str(ex))
         return res
+
+    def updateRule(self, ruleId, opts):
+        """
+        Update rule information for a given rule id
+        :param ruleId: string with the rule id
+        :param opts: dictionary, rule id options passed to Rucio
+        :return: boolean status of update call
+        """
+        status = None
+        try:
+            status = self.cli.update_replication_rule(ruleId, opts)
+        except RuleNotFound:
+            self.logger.error("Cannot find any information for rule id: %s", ruleId)
+        except Exception as ex:
+            self.logger.error("Exception updating rule id: %s. Error: %s", ruleId, str(ex))
+        return status
 
     def deleteRule(self, ruleId, purgeReplicas=False):
         """
@@ -701,21 +758,21 @@ class Rucio(object):
             except InvalidRSEExpression as exc:
                 msg = "Provided RSE expression is considered invalid: {}. Error: {}".format(rseExpr, str(exc))
                 raise WMRucioException(msg)
-        # add this key/value pair to the cache
-        self.cachedRSEs.addItemToCache({rseExpr: matchingRSEs})
+        if useCache:
+            # add this key/value pair to the cache
+            self.cachedRSEs.addItemToCache({rseExpr: matchingRSEs})
         if returnTape:
             return matchingRSEs
         return dropTapeRSEs(matchingRSEs)
 
-    def pickRSE(self, rseExpression='rse_type=TAPE\cms_type=test', rseAttribute='ddm_quota', minNeeded=0):
+    def pickRSE(self, rseExpression='rse_type=TAPE\cms_type=test', rseAttribute='dm_weight'):
         """
         _pickRSE_
 
-        Use a weighted random selection algorithm to pick an RSE for a dataset based on an attribute
+        Use a weighted random selection algorithm to pick an RSE for a dataset based on an RSE attribute.
         The attribute should correlate to space available.
         :param rseExpression: Rucio RSE expression to pick RSEs (defaults to production Tape RSEs)
         :param rseAttribute: The RSE attribute to use as a weight. Must be a number
-        :param minNeeded: If the RSE attribute is less than this number, the RSE will not be considered.
 
         Returns: A tuple of the chosen RSE and if the chosen RSE requires approval to write (rule property)
         """
@@ -724,18 +781,17 @@ class Rucio(object):
         rsesWeight = []
 
         for rse in matchingRSEs:
-            attrs = self.cli.list_rse_attributes(rse)
+            rseAttrs = self.cli.list_rse_attributes(rse)
             if rseAttribute:
                 try:
-                    quota = float(attrs.get(rseAttribute, 0))
+                    attrValue = float(rseAttrs.get(rseAttribute, 0))
                 except (TypeError, KeyError):
-                    quota = 0
+                    attrValue = 0
             else:
-                quota = 1
-            requiresApproval = attrs.get('requires_approval', False)
-            if quota > minNeeded:
-                rsesWithApproval.append((rse, requiresApproval))
-                rsesWeight.append(quota)
+                attrValue = 1
+            requiresApproval = rseAttrs.get('requires_approval', False)
+            rsesWithApproval.append((rse, requiresApproval))
+            rsesWeight.append(attrValue)
 
         return weightedChoice(rsesWithApproval, rsesWeight)
 
@@ -753,7 +809,6 @@ class Rucio(object):
             msg = "Error retrieving attributes for RSE: {}. Error: {}".format(rse, str(exc))
             raise WMRucioException(msg)
         return attrs.get('requires_approval', False)
-
 
     def isContainer(self, didName, scope='cms'):
         """
@@ -862,7 +917,7 @@ class Rucio(object):
 
         # At this point, we might already have some of the RSEs where the data is available and locked
         # Now check dataset locks and compare those rules against our list of multi RSE rules
-        if self.isContainer(kwargs['name']):
+        if self.isContainer(kwargs['name'], scope=kwargs.get('scope', 'cms')):
             # It's a container! Find what those RSEs are and add them to the finalRSEs set
             rseLocks = self._getContainerLockedAndAvailable(multiRSERules, returnTape=returnTape, **kwargs)
             self.logger.debug("Data location for %s from multiple RSE locks and available at: %s",
@@ -921,17 +976,17 @@ class Rucio(object):
         rsesByBlocks = {}
         for block in blockNames:
             rsesByBlocks.setdefault(block, set())
-            ### FIXME: feature request made to the Rucio team to support bulk operations:
-            ### https://github.com/rucio/rucio/issues/3982
+            # FIXME: feature request made to the Rucio team to support bulk operations:
+            # https://github.com/rucio/rucio/issues/3982
             for blockLock in self.cli.get_dataset_locks(kwargs['scope'], block):
                 if not returnTape and isTapeRSE(blockLock['rse']):
                     continue
                 if blockLock['state'] == 'OK' and blockLock['rule_id'] in multiRSERules:
                     rsesByBlocks[block].add(blockLock['rse'])
 
-        ### The question now is:
-        ###   1. do we want to have a full copy of the container in the same RSEs (grouping=A)
-        ###   2. or we want all locations holding at least one block of the container (grouping=D)
+        # The question now is:
+        #   1. do we want to have a full copy of the container in the same RSEs (grouping=A)
+        #   2. or we want all locations holding at least one block of the container (grouping=D)
         if kwargs.get('grouping') == 'A':
             firstRun = True
             for _block, rses in viewitems(rsesByBlocks):
@@ -969,7 +1024,7 @@ class Rucio(object):
         a specific method for this process, even though that adds some code duplication.
         """
         result = dict()
-        if not self.isContainer(container):
+        if not self.isContainer(container, scope=scope):
             raise WMRucioException("Pileup location needs to be resolved for a container DID type")
 
         multiRSERules = []
@@ -1077,7 +1132,7 @@ class Rucio(object):
         """
         if 'name' not in kwargs:
             raise WMRucioException("A DID name must be provided to the getBlockLockedAndAvailable API")
-        if self.isContainer(kwargs['name']):
+        if self.isContainer(kwargs['name'], scope=kwargs.get('scope', 'cms')):
             # then resolve it at container level and all its blocks
             return self.getContainerLockedAndAvailable(**kwargs)
 
@@ -1215,5 +1270,18 @@ class Rucio(object):
         else:
             finalRSEs = list(finalRSEs)
         self.logger.info("Container: %s with block-based location at: %s, and final location: %s",
-                          kwargs['name'], commonBlockRSEs, finalRSEs)
+                         kwargs['name'], commonBlockRSEs, finalRSEs)
         return finalRSEs
+
+    def getRSEUsage(self, rse):
+        """
+        get_rse_usage rucio API
+
+        :param rse: name of RSE
+        :return: generator of records about given RSE
+        """
+        try:
+            return self.cli.get_rse_usage(rse)
+        except Exception as exp:
+            self.logger.error("Failed to get information about rse %s. Error: %s", rse, str(exp))
+            raise exp

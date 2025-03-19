@@ -34,6 +34,10 @@ class Workflow(object):
         self.pileupDatasets = set()
         self.pileupRSEList = set()
 
+        # flag to indicate if workflow is updated, e.g. see MSTransferor when we
+        # update site white/black lists and setup this flag
+        self.dataReplacement = False
+
         self.campaigns = set()
         self.dataCampaignMap = []
         # these blocks structure will be key'ed by the block name and value'd by the block size
@@ -41,7 +45,7 @@ class Workflow(object):
         self.parentBlocks = {}
         # sort of duplicate info, but we need to have a way to link input to parent block(s)
         self.childToParentBlocks = {}
-        # pileup don't need to get resolved into blocks, store only their total size and location
+        # pileup don't need to get resolved into blocks, store only their location
         self.secondarySummaries = {}
 
         self.setDataCampaignMap()
@@ -270,19 +274,16 @@ class Workflow(object):
         """
         return self.primaryBlocks
 
-    def setSecondarySummary(self, dsetName, dsetSize, locations=None):
+    def setSecondarySummary(self, dsetName, locations=None):
         """
         Create a summary of the pileup dataset, with its total data size
         and locations where the whole dataset is subscribed and available
         :param dsetName: string with the secondary dataset name
-        :param dsetSize: integer with the secondary dataset size
         :param locations: locations hosting this dataset in full (and subscribed)
         Data is in the form of:
-        {"dataset_name": {"dsetSize": 1234,
-                          "locations": [list of locations]}}
+        {"dataset_name": {"locations": [list of locations]}}
         """
         self.secondarySummaries.setdefault(dsetName, {})
-        self.secondarySummaries[dsetName]['dsetSize'] = dsetSize
         self.secondarySummaries[dsetName]['locations'] = locations or []
 
     def getSecondarySummary(self):

@@ -3,15 +3,12 @@
 Unittests for Utilities functions
 """
 
-from __future__ import division, print_function
-
 from builtins import object
-import os
 import unittest
 
 from Utils.Utilities import makeList, makeNonEmptyList, strToBool, \
     safeStr, rootUrlJoin, zipEncodeStr, lowerCmsHeaders, getSize, \
-    encodeUnicodeToBytes, diskUse, numberCouchProcess
+    encodeUnicodeToBytes, diskUse, numberCouchProcess, normalize_spaces
 
 
 class UtilitiesTests(unittest.TestCase):
@@ -30,11 +27,11 @@ class UtilitiesTests(unittest.TestCase):
         self.assertListEqual(makeList(['123', 456, '789']), ['123', 456, '789'])
 
         self.assertEqual(makeList('123'), ['123'])
-        self.assertEqual(makeList(u'123'), [u'123'])
+        self.assertEqual(makeList('123'), ['123'])
         self.assertListEqual(makeList('123,456'), ['123', '456'])
-        self.assertListEqual(makeList(u'123,456'), [u'123', u'456'])
+        self.assertListEqual(makeList('123,456'), ['123', '456'])
         self.assertListEqual(makeList('["aa","bb","cc"]'), ['aa', 'bb', 'cc'])
-        self.assertListEqual(makeList(u' ["aa", "bb", "cc"] '), ['aa', 'bb', 'cc'])
+        self.assertListEqual(makeList(' ["aa", "bb", "cc"] '), ['aa', 'bb', 'cc'])
 
         self.assertRaises(ValueError, makeList, 123)
         self.assertRaises(ValueError, makeList, 123.456)
@@ -60,7 +57,7 @@ class UtilitiesTests(unittest.TestCase):
         self.assertEqual(makeList(['123']), makeNonEmptyList(['123']))
         self.assertListEqual(makeList(['123', 456, '789']), makeNonEmptyList(['123', 456, '789']))
 
-        self.assertListEqual(makeList(u'123,456'), makeNonEmptyList(u'123, 456'))
+        self.assertListEqual(makeList('123,456'), makeNonEmptyList('123, 456'))
         self.assertListEqual(makeList('["aa","bb","cc"]'), makeNonEmptyList('["aa", "bb", "cc"]'))
 
         self.assertRaises(ValueError, makeNonEmptyList, [])
@@ -82,7 +79,7 @@ class UtilitiesTests(unittest.TestCase):
         """
         Test the safeStr function.
         """
-        for v in ['123', u'123', 123]:
+        for v in ['123', '123', 123]:
             self.assertEqual(safeStr(v), '123')
         self.assertEqual(safeStr(123.45), '123.45')
         self.assertEqual(safeStr(False), 'False')
@@ -172,8 +169,63 @@ cms::Exception caught in CMS.EventProcessor and rethrown
         Test the `diskUse` function.
         """
         data = diskUse()
+
+        # `data` is a list of dictionaries with three keys each:
+        # [
+        #   {
+        #    "filesystem": "devtmpfs",
+        #    "mounted": "/dev",
+        #    "percent": "0%"
+        #  },
+        #  {
+        #    "filesystem": "/dev/vda1",
+        #    "mounted": "/",
+        #    "percent": "76%"
+        #  }
+        #  [...]
+        # ]
+        print(data)
+
         # assuming nodes will always have at least 3 partitions/mount points
         self.assertTrue(len(data) > 2)
+
+        # - 1. every dictionary in the list needs to contain all of the 
+        #   expexted keys and their values must be a non-empty string
+        # - 2. the value of the "percent" key needs to be either "100" 
+        #   or a one or two digits int, followed by a percentage character "%"
+        # - 3. there must be at least one entry whose filesystem contains `/dev/*`
+        filesystem_is_dev = 0
+        for entry in data:
+            print(entry)
+
+            # check 1.
+            self.assertTrue("filesystem" in entry)
+            self.assertTrue("mounted" in entry)
+            self.assertTrue("percent" in entry)
+            for value in entry.values():
+                self.assertTrue(isinstance(value, str))
+                self.assertTrue(len(value) > 0)
+
+            import re
+            # ref: https://docs.python.org/3/library/re.html#re.search
+            # re.search() returns None if no position in the string matches the pattern
+
+            # check 2.
+            self.assertTrue(re.search("^(100|[0-9]{1,2})%$", entry["percent"]) is not None)
+
+            # check 3.
+            if re.search("^/dev/.+$" , entry["filesystem"]):
+                filesystem_is_dev += 1
+
+        self.assertTrue(filesystem_is_dev > 0)
+
+    def testNormalizeSpaces(self):
+        """
+        Test the `normalize_spaces` function.
+        """
+        data = normalize_spaces("bla bla     bla    ")
+        expect = "bla bla bla"
+        self.assertEqual(data, expect)
 
     def testNumberCouchProcess(self):
         """

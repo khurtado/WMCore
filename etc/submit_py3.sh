@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# acquire initial timestamps for reporting in FJR
+timeStartSec=`date +%s`
+
 # On some sites we know there were some problems with environment cleaning
 # with using 'env -i'. To overcome this issue, whenever we start a job, we have
 # to save full current environment into file, and whenever it is needed we can load
@@ -54,7 +58,9 @@ PY3_FUTURE_VERSION=0.18.2
 # Saving START_TIME and when job finishes END_TIME.
 WMA_MIN_JOB_RUNTIMESECS=300
 START_TIME=$(date +%s)
-WMA_DEFAULT_OS=rhel7
+WMA_DEFAULT_OS=rhel8
+WMA_CURRENT_OS=rhel$(rpm --eval '%{rhel}')
+[[ $WMA_CURRENT_OS =~ ^rhel[6789]?$ ]] || WMA_CURRENT_OS=$WMA_DEFAULT_OS
 # assign arguments
 SANDBOX=$1
 INDEX=$2
@@ -138,10 +144,10 @@ echo "======== WMAgent COMP Python bootstrap starting at $(TZ=GMT date) ========
 
 # First, decide which COMP ScramArch to use based on the required OS and Architecture
 THIS_ARCH=`uname -m`  # if it's PowerPC, it returns `ppc64le`
-# if this job can run at any OS, then use rhel7 as default
+# if this job can run at any OS, then try to run it on the OS discovered at runtime
 if [ "$REQUIRED_OS" = "any" ]
 then
-    WMA_SCRAM_ARCH=${WMA_DEFAULT_OS}_${THIS_ARCH}
+    WMA_SCRAM_ARCH=${WMA_CURRENT_OS}_${THIS_ARCH}
 else
     WMA_SCRAM_ARCH=${REQUIRED_OS}_${THIS_ARCH}
 fi
@@ -186,6 +192,34 @@ else
 fi
 echo -e "======== WMAgent Python bootstrap finished at $(TZ=GMT date) ========\n"
 
+echo -e "======= WMAgent token verification at $(TZ=GMT date) ========\n"
+if [ -n "${_CONDOR_CREDS}" ]; then
+    echo "Content under _CONDOR_CREDS: ${_CONDOR_CREDS}"
+    ls -l ${_CONDOR_CREDS}
+    # Now, check specifically for cms token
+    if [ -f "${_CONDOR_CREDS}/cms.use" ]
+    then
+        echo "CMS token found, setting BEARER_TOKEN_FILE=${_CONDOR_CREDS}/cms.use"
+        export BEARER_TOKEN_FILE=${_CONDOR_CREDS}/cms.use
+    
+        # Show token information
+        # This tool requires htgettoken package in the cmssw runtime apptainer image
+        if command -v httokendecode ls 2>&1 > /dev/null
+        then
+            httokendecode -H ${BEARER_TOKEN_FILE}
+        else
+            echo "Warning: [WMAgent Token verification] httokendecode tool could not be found."
+            echo "Warning: Token exists and can be used, but details will not be displayed."
+        fi
+    else
+        echo "[WMAgent token verification]: The bearer token file could not be found."
+        # Do not fail, we still support x509 proxies
+        # if we fail here in the future, we need to define an exit code number
+        # exit 1106
+    fi
+else
+    echo "Variable _CONDOR_CREDS is not defined, condor auth/token credentials directory not found."
+fi
 
 echo "======== WMAgent Unpack the job starting at $(TZ=GMT date) ========"
 # Should be ready to unpack and run this
@@ -207,12 +241,25 @@ $pythonCommand Startup.py
 jobrc=$?
 echo -e "======== WMAgent Run the job FINISH at $(TZ=GMT date) ========\n"
 
+# add WMTiming metrics to FJR pkl file
+echo "======== WMAgent add WMTiming metrics to FJR $outputFile ========"
+timeEndSec=`date +%s`
+tpy=$HOME/job/Utils/Timestamps.py
+reportIn=WMTaskSpace/$outputFile
+echo -e "$pythonCommand $tpy --reportFile=$reportIn --wmJobEnd=$timeEndSec --wmJobStart=$timeStartSec"
+$pythonCommand $tpy --reportFile=$reportIn --wmJobEnd=$timeEndSec --wmJobStart=$timeStartSec
+status=$?
+if [ "$status" != "0" ]; then
+    echo "WARNING: failed to update FJR with timestamps metrics, status=$status"
+fi
+echo -e "======== WMAgent finished adding WMTiming metrics to FJR ========\n"
 
 echo "WMAgent bootstrap: WMAgent finished the job, it's copying the pickled report"
 set -x
-cp WMTaskSpace/Report*.pkl ../
+cp WMTaskSpace/$outputFile ../
 ls -l WMTaskSpace
 ls -l WMTaskSpace/*
+
 set +x
 echo -e "======== WMAgent bootstrap FINISH at $(TZ=GMT date) ========\n"
 exit $jobrc

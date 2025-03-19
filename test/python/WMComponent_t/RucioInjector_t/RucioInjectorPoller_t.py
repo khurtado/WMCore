@@ -76,7 +76,7 @@ class RucioInjectorPollerTest(EmulatedUnitTestCase):
         config.RucioInjector.createBlockRules = True
         config.RucioInjector.RSEPostfix = False  # enable it to append _Test to the RSE names
         config.RucioInjector.metaDIDProject = "Production"
-        config.RucioInjector.containerDiskRuleParams = {"weight": "ddm_quota", "copies": 2, "grouping": "DATASET"}
+        config.RucioInjector.containerDiskRuleParams = {"weight": "dm_weight", "copies": 2, "grouping": "DATASET"}
         config.RucioInjector.blockRuleParams = {}
         config.RucioInjector.containerDiskRuleRSEExpr = "(tier=2|tier=1)&cms_type=real&rse_type=DISK"
         config.RucioInjector.rucioAccount = "wma_test"
@@ -181,13 +181,15 @@ class RucioInjectorPollerTest(EmulatedUnitTestCase):
         # create and insert blocks into dbsbuffer table
         newBlockA = DBSBufferBlock(name=self.blockAName,
                                    location="T2_CH_CERN",
-                                   datasetpath=None)
+                                   datasetpath=None,
+                                   uploader="WMAgent")
         newBlockA.setDataset(self.testDatasetA, 'data', 'VALID')
         newBlockA.status = 'Closed'
 
         newBlockB = DBSBufferBlock(name=self.blockBName,
                                    location="T1_US_FNAL_Disk",
-                                   datasetpath=None)
+                                   datasetpath=None,
+                                   uploader="WMAgent")
         newBlockB.setDataset(self.testDatasetB, 'data', 'VALID')
         newBlockB.status = 'Closed'
 

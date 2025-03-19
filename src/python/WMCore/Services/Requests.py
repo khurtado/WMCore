@@ -118,9 +118,21 @@ class Requests(dict):
             cache_dir = (self.cachePath(idict.get('cachepath'), idict.get('service_name')))
             self["cachepath"] = cache_dir
             self["req_cache_path"] = os.path.join(cache_dir, '.cache')
+
+        # Try to resolve the key/cert pair path in the constructor:
+        # NOTE: Calling self.getKeyCert() assures that if the pair is already provided by
+        #       the caller (e.g. the higher level Service class) through the `idict' argument
+        #       during construction time, no additional os.environ calls would be made.
+        #       If the pair is not provided anywhere: not by the higher level class
+        #       nor from the environment, Exception will be raised early during construction
+        #       time rather than later during an internel method call.
         self.setdefault("cert", None)
         self.setdefault("key", None)
+        self['key'], self['cert'] = self.getKeyCert()
+
         self.setdefault('capath', None)
+        self['capath'] = self.getCAPath()
+
         self.setdefault("timeout", 300)
         self.setdefault("logger", logging)
 
@@ -232,7 +244,7 @@ class Requests(dict):
             setattr(e, 'result', str(ex))
             raise e from None
         except (socket.error, AttributeError):
-            self['logger'].warn("Http request failed, retrying once again..")
+            self['logger'].warning("Http request failed, retrying once again..")
             # AttributeError implies initial connection error - need to close
             # & retry. httplib2 doesn't clear httplib state before next request
             # if this is threaded this may spoil things
@@ -488,7 +500,7 @@ class Requests(dict):
         elif verb == 'PUT':
             c.setopt(pycurl.CUSTOMREQUEST, 'PUT')
         else:
-            raise HTTPException("Verb %s not sopported for upload." % verb)
+            raise HTTPException("Verb %s not supported for upload." % verb)
         c.setopt(c.URL, url)
         fullParams = [(fieldName, (c.FORM_FILE, fileName))]
         fullParams.extend(params)

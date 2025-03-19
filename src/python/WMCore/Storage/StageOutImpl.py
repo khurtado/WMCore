@@ -8,7 +8,7 @@ inherit this object and implement the methods accordingly
 """
 from __future__ import print_function
 
-from builtins import range, object
+from builtins import range
 
 import logging
 import os
@@ -18,7 +18,7 @@ from WMCore.Storage.Execute import runCommandWithOutput
 from WMCore.Storage.StageOutError import StageOutError
 
 
-class StageOutImpl(object):
+class StageOutImpl:
     """
     _StageOutImpl_
 
@@ -37,6 +37,35 @@ class StageOutImpl(object):
         self.numRetries = 3
         self.retryPause = 600
         self.stageIn = stagein
+        self.debuggingTemplate =  "#!/bin/bash\n"
+        self.debuggingTemplate += """
+        echo
+        echo
+        echo "-----------------------------------------------------------"
+        echo "==========================================================="
+        echo
+        echo "Debugging information on failing copy command"
+        echo
+        echo "Current date and time: $(date +"%Y-%m-%d %H:%M:%S")"
+        echo "copy command which failed: {copy_command}"
+        echo "Hostname:   $(hostname -f)"
+        echo "OS:  $(uname -r -s)"
+        echo
+        echo "PYTHON environment variables:"
+        env | grep ^PYTHON
+        echo
+        echo "LD_* environment variables:"
+        env | grep ^LD_
+        echo
+        echo "Source PFN: {source}"
+        echo "Target PFN: {destination}"
+        echo
+        echo "VOMS proxy info:"
+        voms-proxy-info -all
+        echo "==========================================================="
+        echo "-----------------------------------------------------------"
+        echo
+        """
 
     @staticmethod
     def splitPFN(pfn):
@@ -48,12 +77,12 @@ class StageOutImpl(object):
         """
         protocol = pfn.split(':')[0]
         host = pfn.split('/')[2]
-        thisList = pfn.replace('%s://%s/' % (protocol, host), '').split('?')
+        thisList = pfn.replace('{}://{}/'.format(protocol, host), '').split('?')
         path = thisList[0]
         opaque = ""
         # If we have any opaque info keep it
         if len(thisList) == 2:
-            opaque = "?%s" % thisList[1]
+            opaque = "?{}".format(thisList[1])
 
         # check for the path to actually be in the opaque information
         if opaque.startswith("?path="):
@@ -85,16 +114,16 @@ class StageOutImpl(object):
         """
         try:
             exitCode, output = runCommandWithOutput(command)
-            msg = "Command exited with status: %s\nOutput message: %s" % (exitCode, output)
+            msg = "Command exited with status: {}\nOutput message: {}".format(exitCode, output)
             logging.info(msg)
         except Exception as ex:
-            raise StageOutError(str(ex), Command=command, ExitCode=60311)
+            raise StageOutError(str(ex), Command=command, ExitCode=60311) from ex
 
         if exitCode:
-            msg = "Command exited non-zero, ExitCode:%s\nOutput: %s " % (exitCode, output)
-            logging.error("Exception During Stage Out:\n%s", msg)
+            msg = "Command exited non-zero, ExitCode: {}\nOutput: {}".format(exitCode, output)
+            formatted_msg = "Exception During Stage Out:\n{}".format(msg)
+            logging.error(formatted_msg)
             raise StageOutError(msg, Command=command, ExitCode=exitCode)
-        return
 
     def createSourceName(self, protocol, pfn):
         """
@@ -131,7 +160,6 @@ class StageOutImpl(object):
 
         If no directory is required, do not implement this method
         """
-        pass
 
     def createStageOutCommand(self, sourcePFN, targetPFN, options=None, checksums=None):
         """
@@ -143,6 +171,13 @@ class StageOutImpl(object):
         """
         raise NotImplementedError("StageOutImpl.createStageOutCommand")
 
+    def createDebuggingCommand(self, sourcePFN, targetPFN, options=None, checksums=None):
+        """
+        Build a shell command that will report in the logs the details about
+        failing stageOut commands
+        """
+        raise NotImplementedError("StageOutImpl.createDebuggingCommand")
+    
     def removeFile(self, pfnToRemove):
         """
         _removeFile_
@@ -160,9 +195,9 @@ class StageOutImpl(object):
         return the command to delete a file after a failed copy
         """
         if pfn.startswith("/"):
-            return "/bin/rm -f %s" % pfn
+            return "/bin/rm -f {}".format(pfn)
         elif os.path.isfile(pfn):
-            return "/bin/rm -f %s" % os.path.abspath(pfn)
+            return "/bin/rm -f {}".format(os.path.abspath(pfn))
         else:
             return ""
 
@@ -183,7 +218,6 @@ class StageOutImpl(object):
         # destination may also need PFN changed
         # i.e. if we are staging in a file from an SE
         targetPFN = self.createTargetName(protocol, targetPFN)
-
         #  //
         # // Create the output directory if implemented
         # //
@@ -193,9 +227,9 @@ class StageOutImpl(object):
                 self.createOutputDirectory(targetPFN)
                 break
             except StageOutError as ex:
-                msg = "Attempt %s to create a directory for stageout failed.\n" % retryCount
-                msg += "Automatically retrying in %s secs\n " % self.retryPause
-                msg += "Error details:\n%s\n" % str(ex)
+                msg = "Attempt {} to create a directory for stageout failed.\n".format(retryCount)
+                msg += "Automatically retrying stage out in {} secs\n ".format(self.retryPause)
+                msg += "Error details:\n{}\n".format(str(ex))
                 logging.error(msg)
                 if retryCount == self.numRetries:
                     #  //
@@ -212,22 +246,25 @@ class StageOutImpl(object):
         # // Run the command
         # //
 
+        stageOutEx = None  # variable to store the possible StageOutError
         for retryCount in range(self.numRetries + 1):
             try:
                 logging.info("Running the stage out...")
                 self.executeCommand(command)
                 break
             except StageOutError as ex:
-                msg = "Attempt %s to stage out failed.\n" % retryCount
-                msg += "Automatically retrying in %s secs\n " % self.retryPause
-                msg += "Error details:\n%s\n" % str(ex)
+                msg = "Attempt {} to stage out failed.\n".format(retryCount)
+                msg += "Error details:\n{}\n".format(str(ex))
                 logging.error(msg)
                 if retryCount == self.numRetries:
-                    #  //
-                    # // last retry, propagate exception
-                    # //
-                    raise ex
+                    # Last retry, propagate the information outside of the for loop
+                    stageOutEx = ex
+                msg += "Automatically retrying in {} secs\n ".format(self.retryPause)
                 time.sleep(self.retryPause)
 
-        # should never reach this point
-        return
+        # This block will now always be executed after retries are exhausted
+        if stageOutEx is not None:
+            logging.error("Maximum number of retries exhausted. Further details on the failed command reported below.")
+            command = self.createDebuggingCommand(sourcePFN, targetPFN, options, checksums)
+            self.executeCommand(command)
+            raise stageOutEx from None

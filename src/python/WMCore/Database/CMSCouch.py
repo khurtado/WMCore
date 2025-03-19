@@ -20,9 +20,11 @@ import urllib.request, urllib.parse, urllib.error
 
 import base64
 import hashlib
+import json
 import logging
 import re
 import time
+import sys
 from datetime import datetime
 from http.client import HTTPException
 
@@ -146,29 +148,31 @@ class CouchDBRequests(JSONRequests):
         Check the HTTP status and raise an appropriate exception.
         """
         if status == 400:
-            raise CouchBadRequestError(reason, data, result)
+            raise CouchBadRequestError(reason, data, result, status)
         elif status == 401:
-            raise CouchUnauthorisedError(reason, data, result)
+            raise CouchUnauthorisedError(reason, data, result, status)
         elif status == 403:
-            raise CouchForbidden(reason, data, result)
+            raise CouchForbidden(reason, data, result, status)
         elif status == 404:
-            raise CouchNotFoundError(reason, data, result)
+            raise CouchNotFoundError(reason, data, result, status)
         elif status == 405:
-            raise CouchNotAllowedError(reason, data, result)
+            raise CouchNotAllowedError(reason, data, result, status)
         elif status == 406:
-            raise CouchNotAcceptableError(reason, data, result)
+            raise CouchNotAcceptableError(reason, data, result, status)
         elif status == 409:
-            raise CouchConflictError(reason, data, result)
+            raise CouchConflictError(reason, data, result, status)
         elif status == 410:
-            raise CouchFeatureGone(reason, data, result)
+            raise CouchFeatureGone(reason, data, result, status)
         elif status == 412:
-            raise CouchPreconditionFailedError(reason, data, result)
+            raise CouchPreconditionFailedError(reason, data, result, status)
+        elif status == 413:
+            raise CouchRequestTooLargeError(reason, data, result, status)
         elif status == 416:
-            raise CouchRequestedRangeNotSatisfiableError(reason, data, result)
+            raise CouchRequestedRangeNotSatisfiableError(reason, data, result, status)
         elif status == 417:
-            raise CouchExpectationFailedError(reason, data, result)
+            raise CouchExpectationFailedError(reason, data, result, status)
         elif status == 500:
-            raise CouchInternalServerError(reason, data, result)
+            raise CouchInternalServerError(reason, data, result, status)
         elif status in [502, 503, 504]:
             # There are HTTP errors that CouchDB doesn't raise but can appear
             # in our environment, e.g. behind a proxy. Reraise the HTTPException
@@ -222,6 +226,13 @@ class Database(CouchDBRequests):
                     doc[label] = int(time.time())
         return data
 
+    def getQueueSize(self):
+        """
+        Return the current size of the queue, i.e., how
+        many documents are already queued up
+        """
+        return len(self._queue)
+
     def queue(self, doc, timestamp=False, viewlist=None, callback=None):
         """
         Queue up a doc for bulk insert. If timestamp = True add a timestamp
@@ -235,8 +246,8 @@ class Database(CouchDBRequests):
         if timestamp:
             self.timestamp(doc, timestamp)
         # TODO: Thread this off so that it's non blocking...
-        if len(self._queue) >= self._queue_size:
-            print('queue larger than %s records, committing' % self._queue_size)
+        if self.getQueueSize() >= self._queue_size:
+            logging.warning('queue larger than %s records, committing', self._queue_size)
             self.commit(viewlist=viewlist, callback=callback)
         self._queue.append(doc)
 
@@ -326,30 +337,6 @@ class Database(CouchDBRequests):
         if rev:
             uri += '?' + urllib.parse.urlencode({'rev': rev})
         return Document(id=id, inputDict=self.get(uri))
-
-    def getPrevisousRevision(self, doc_id, numberBefore=1):
-        """
-        :param: doc_id, couch document id
-        :param: numberBefore: previous revision, 1 means one previous revision, 2 means 2 doucments eariler.
-                              special case 0 means the first revision.
-        :return: previous revision document specified by numberBefore
-        """
-        uri = '/%s/%s?revs=true&open_revs=all' % (self.name, urllib.parse.quote_plus(doc_id))
-        revisionRecord = self.get(uri)
-        rev = revisionRecord[0]['ok']['_revisions']
-
-        if numberBefore == 0:
-            revNum = 1
-            revID = rev['start'] - 1
-        else:
-            revNum = rev['start'] - numberBefore
-            revID = rev['ids'][numberBefore]
-        preRev = "%s-%s" % (revNum, revID)
-
-        if doc_id != revisionRecord[0]['ok']['_id']:
-            raise CouchError("revision record doesn match", revisionRecord[0]['ok']['_id'], doc_id)
-
-        return self.document(doc_id, preRev)
 
     def updateDocument(self, doc_id, design, update_func, fields=None, useBody=False):
         """
@@ -931,10 +918,6 @@ class RotatingDatabase(Database):
         """
         return [doc['value'] for doc in self._find_dbs_in_state('archived')]
 
-    def non_rotating_commit(self):
-        # might need this after all....
-        pass
-
     def makeRequest(self, uri=None, data=None, type='GET', incoming_headers=None,
                     encode=True, decode=True, contentType=None,
                     cache=False, rotate=True):
@@ -1016,7 +999,7 @@ class CouchServer(CouchDBRequests):
         check_name(dbname)
         dbname = urllib.parse.quote_plus(dbname)
         if "cmsweb" in self.url:
-            msg = f"You can't be serious that you want to delete a PROODUCTION database!!! "
+            msg = f"You can't be serious that you want to delete a PRODUCTION database!!! "
             msg += f"At url: {self.url}, for database name: {dbname}. Bailing out!"
             raise RuntimeError(msg)
         return self.delete("/%s" % dbname)
@@ -1033,7 +1016,7 @@ class CouchServer(CouchDBRequests):
 
     def replicate(self, source, destination, continuous=False,
                   create_target=False, cancel=False, doc_ids=False,
-                  filter=False, query_params=False, sleepSecs=0):
+                  filter=False, query_params=False, sleepSecs=0, selector=False):
         """
         Trigger replication between source and destination. CouchDB options are
         defined in: https://docs.couchdb.org/en/3.1.2/api/server/common.html#replicate
@@ -1056,6 +1039,7 @@ class CouchServer(CouchDBRequests):
                        this filter is expected to have been defined in the design doc.
         :param query_params: dictionary of parameters to pass over to the filter function
         :param sleepSecs: amount of seconds to sleep after the replication job is created
+        :param selector: a new'ish feature for filter functions in Erlang
         :return: status of the replication creation
         """
         listDbs = self.listDatabases()
@@ -1081,6 +1065,8 @@ class CouchServer(CouchDBRequests):
             data["filter"] = filter
             if query_params:
                 data["query_params"] = query_params
+        if selector: data["selector"] = selector
+
         resp = self.post('/_replicator', data)
         # Sleep required for CouchDB 3.x unit tests
         time.sleep(sleepSecs)
@@ -1117,82 +1103,94 @@ class CouchError(Exception):
         self.status = status
 
     def __str__(self):
-        "Stringify the error"
-        if self.status != None:
-            errorMsg = "NEW ERROR STATUS! UPDATE CMSCOUCH.PY!: %s\n" % self.status
-        else:
-            errorMsg = ""
-        return errorMsg + "%s - reason: %s, data: %s result: %s" % (self.type,
-                                                                    self.reason,
-                                                                    repr(self.data),
-                                                                    self.result)
+        """Stringify the error"""
+        errorMsg = ""
+        if self.type == "CouchError":
+            errorMsg += "A NEW COUCHDB ERROR TYPE/STATUS HAS BEEN FOUND! "
+            errorMsg += "UPDATE CMSCOUCH.PY IMPLEMENTATION WITH A NEW COUCH ERROR/STATUS! "
+            errorMsg += f"Status: {self.status}\n"
+        errorMsg += f"Error type: {self.type}, Status code: {self.status}, "
+        errorMsg += f"Reason: {self.reason}, Data: {repr(self.data)}"
+        return errorMsg
 
 
 class CouchBadRequestError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchBadRequestError"
 
 
 class CouchUnauthorisedError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchUnauthorisedError"
 
 
 class CouchNotFoundError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchNotFoundError"
 
 
 class CouchNotAllowedError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchNotAllowedError"
 
 class CouchNotAcceptableError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchNotAcceptableError"
 
 class CouchConflictError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchConflictError"
 
 
 class CouchFeatureGone(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchFeatureGone"
 
 
 class CouchPreconditionFailedError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchPreconditionFailedError"
 
+
+class CouchRequestTooLargeError(CouchError):
+    def __init__(self, reason, data, result, status):
+        # calculate the size of this JSON serialized object
+        docSize = sys.getsizeof(json.dumps(data))
+        errorMsg = f"Document has {docSize} bytes and it's too large to be accepted by CouchDB. "
+        errorMsg += f"Check the CouchDB configuration to see the current value "
+        errorMsg += f"under 'couchdb.max_document_size' (default is 8M bytes)."
+        CouchError.__init__(self, reason, errorMsg, result, status)
+        self.type = "CouchRequestTooLargeError"
+
+
 class CouchExpectationFailedError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchExpectationFailedError"
 
 class CouchRequestedRangeNotSatisfiableError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchRequestedRangeNotSatisfiableError"
 
 
 class CouchInternalServerError(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchInternalServerError"
 
 
 class CouchForbidden(CouchError):
-    def __init__(self, reason, data, result):
-        CouchError.__init__(self, reason, data, result)
+    def __init__(self, reason, data, result, status):
+        CouchError.__init__(self, reason, data, result, status)
         self.type = "CouchForbidden"
 
 

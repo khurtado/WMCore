@@ -18,7 +18,7 @@ import unittest
 
 from Utils.PythonVersion import PY3
 
-from WMCore_t.WMSpec_t.TestSpec import testWorkload
+from WMCore_t.WMSpec_t.TestSpec import createTestWorkload
 from nose.plugins.attrib import attr
 
 from WMComponent.JobCreator.JobCreatorPoller import JobCreatorPoller, capResourceEstimates
@@ -160,12 +160,10 @@ class JobCreatorTest(EmulatedUnitTestCase):
 
     def createWorkload(self, workloadName='Test'):
         """
-        _createTestWorkload_
-
         Creates a test workload for us to run on, hold the basic necessities.
         """
 
-        workload = testWorkload(workloadName)
+        workload = createTestWorkload(workloadName)
         rereco = workload.getTask("ReReco")
         seederDict = {"generator.initialSeed": 1001, "evtgenproducer.initialSeed": 1001}
         rereco.addGenerator("PresetSeeder", **seederDict)
@@ -300,6 +298,91 @@ class JobCreatorTest(EmulatedUnitTestCase):
 
         return
 
+    def testCampaignName(self):
+        """
+        Test campaign name is written into job pickle file
+        """
+        myThread = threading.currentThread()
+
+        config = self.getConfig()
+
+        name = makeUUID()
+        nSubs = 1
+        nFiles = 1
+        workloadName = 'TestWorkload'
+
+        dummyWorkload = self.createWorkload(workloadName=workloadName)
+        workloadPath = os.path.join(self.testDir, 'workloadTest', 'TestWorkload', 'WMSandbox', 'WMWorkload.pkl')
+
+        self.createJobCollection(name=name, nSubs=nSubs, nFiles=nFiles, workflowURL=workloadPath)
+
+        testJobCreator = JobCreatorPoller(config=config)
+
+        # First, can we run once without everything crashing?
+        testJobCreator.algorithm()
+
+        getJobsAction = self.daoFactory(classname="Jobs.GetAllJobs")
+        result = getJobsAction.execute(state='Created', jobType="Processing")
+
+        # Find the test directory
+        testDirectory = os.path.join(self.testDir, 'jobCacheDir', 'TestWorkload', 'ReReco')
+        groupDirectory = os.path.join(testDirectory, 'JobCollection_1_0')
+
+        # Get job pickle file
+        jobDir = os.listdir(groupDirectory)[0]
+        jobFile = os.path.join(groupDirectory, jobDir, 'job.pkl')
+        self.assertTrue(os.path.isfile(jobFile))
+        with open(jobFile, 'rb') as f:
+            job = pickle.load(f)
+
+        # Attribute campaign name should exist
+        # but be set to the default value: None
+        self.assertEqual(job['campaignName'], None)
+
+        return
+
+    def testPhysicsType(self):
+        """
+        Test physics type is written into job pickle file
+        """
+        myThread = threading.currentThread()
+
+        config = self.getConfig()
+
+        name = makeUUID()
+        nSubs = 1
+        nFiles = 1
+        workloadName = 'TestWorkload'
+
+        dummyWorkload = self.createWorkload(workloadName=workloadName)
+        workloadPath = os.path.join(self.testDir, 'workloadTest', 'TestWorkload', 'WMSandbox', 'WMWorkload.pkl')
+
+        self.createJobCollection(name=name, nSubs=nSubs, nFiles=nFiles, workflowURL=workloadPath)
+
+        testJobCreator = JobCreatorPoller(config=config)
+
+        # First, can we run once without everything crashing?
+        testJobCreator.algorithm()
+
+        getJobsAction = self.daoFactory(classname="Jobs.GetAllJobs")
+        result = getJobsAction.execute(state='Created', jobType="Processing")
+
+        # Find the test directory
+        testDirectory = os.path.join(self.testDir, 'jobCacheDir', 'TestWorkload', 'ReReco')
+        groupDirectory = os.path.join(testDirectory, 'JobCollection_1_0')
+
+        # Get job pickle file
+        jobDir = os.listdir(groupDirectory)[0]
+        jobFile = os.path.join(groupDirectory, jobDir, 'job.pkl')
+        self.assertTrue(os.path.isfile(jobFile))
+        with open(jobFile, 'rb') as f:
+            job = pickle.load(f)
+
+        # Attribute campaign name should exist
+        # but be set to the default value: None
+        self.assertEqual(job['physicsTaskType'], None)
+
+        return
     @attr('performance', 'integration')
     def testProfilePoller(self):
         """

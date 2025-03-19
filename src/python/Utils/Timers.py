@@ -3,11 +3,42 @@
 Utilities related to timing and performance testing
 """
 
-from __future__ import print_function, division, absolute_import
-
 from builtins import object
+import logging
 import time
+import calendar
 from datetime import tzinfo, timedelta
+
+
+def gmtimeSeconds():
+    """
+    Return GMT time in seconds
+    """
+    return int(time.mktime(time.gmtime()))
+
+
+def encodeTimestamp(secs):
+    """
+    Encode second since epoch to a string GMT timezone representation
+    :param secs: input timestamp value (either int or float) in seconds since epoch
+
+    :return: time string in GMT timezone representation
+    """
+    if not isinstance(secs, (int, float)):
+        raise Exception("Wrong input, should be seconds since epoch either int or float value")
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(secs)))
+
+
+def decodeTimestamp(timeString):
+    """
+    Decode timestamps in provided document
+    :param timeString: timestamp string represention in GMT timezone, see encodeTimestamp
+
+    :return: seconds since ecouch in GMT timezone
+    """
+    if not isinstance(timeString, str):
+        raise Exception("Wrong input, should be time string in GMT timezone representation")
+    return calendar.timegm(time.strptime(timeString, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 def timeFunction(func):
@@ -41,18 +72,18 @@ class CodeTimer(object):
         do_something()
     """
 
-    def __init__(self, label='The function'):
+    def __init__(self, label='The function', logger=None):
         self.start = time.time()
         self.label = label
+        self.logger = logger or logging.getLogger()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         end = time.time()
-        runtime = end - self.start
-        msg = '{label} took {time} seconds to complete'
-        print(msg.format(label=self.label, time=runtime))
+        runtime = round((end - self.start), 3)
+        self.logger.info(f"{self.label} took {runtime} seconds to complete")
 
 
 class LocalTimezone(tzinfo):

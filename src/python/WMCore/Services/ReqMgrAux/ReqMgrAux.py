@@ -104,7 +104,7 @@ class ReqMgrAux(Service):
         resp = self["requests"].put('cmsswversions', cmsswVersions)[0]['result']
 
         if resp and resp[0].get("ok", False):
-            self["logger"].info("CMSSW document successfuly updated.")
+            self["logger"].info("CMSSW document successfully updated.")
             return True
 
         msg = "Failed to update CMSSW document. Response: %s" % resp
@@ -410,8 +410,10 @@ def listDiskUsageOverThreshold(config, updateDB):
 
     if updateDB and not t0Flag:
         agentDrainMode = bool(len(overThresholdDisks))
-        if agentConfig and (agentDrainMode != agentConfig["AgentDrainMode"]):
-            reqMgrAux.updateWMAgentConfig(config.Agent.hostName, {"AgentDrainMode": agentDrainMode},
-                                          inPlace=True)
+        if agentConfig and (agentDrainMode != agentConfig.get("AgentDrainMode")):
+            if agentConfig.get("UserDrainMode") is True:
+                logging.info("Agent is already in UserDrainMode: True mode. No need to update.")
+            else:
+                reqMgrAux.updateWMAgentConfig(config.Agent.hostName, {"AgentDrainMode": agentDrainMode}, inPlace=True)
 
     return overThresholdDisks

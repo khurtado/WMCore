@@ -6,6 +6,7 @@ from WMCore.Database.CMSCouch import CouchServer, CouchConflictError
 from WMCore.Lexicon import splitCouchServiceURL
 from WMCore.WMSpec.WMWorkload import WMWorkloadHelper
 from WMCore.WorkQueue.DataStructs.WorkQueueElement import STATES
+from WMCore.WorkQueue.DataStructs.CouchWorkQueueElement import CouchWorkQueueElement
 
 
 def convertWQElementsStatusToWFStatus(elementsStatusSet):
@@ -200,10 +201,12 @@ class WorkQueue(object):
         if not elementIds:
             return
         eleParams = {}
+        if 'RequestPriority' in updatedParams:
+            updatedParams['Priority'] = updatedParams.pop('RequestPriority')
         eleParams[self.eleKey] = updatedParams
         conflictIDs = self.db.updateBulkDocumentsWithConflictHandle(elementIds, eleParams, maxConflictLimit=20)
         if conflictIDs:
-            raise CouchConflictError("WQ update failed with conflict", data=updatedParams, result=conflictIDs)
+            raise CouchConflictError("WQ update failed with conflict", data=updatedParams, result=conflictIDs, status=409)
         return
 
     def getAvailableWorkflows(self):
@@ -218,7 +221,18 @@ class WorkQueue(object):
         return availableSet - notAvailableSet
 
     def cancelWorkflow(self, wf):
-        """Cancel a workflow"""
+        """
+        Cancel a workflow in both workqueue and workqueue_inbox database.
+        :param wf: string with the workflow name
+        :return: the status code for the couchdb update call
+        """
+        # first, update the single workflow workqueue_inbox element, if needed
+        inboxData = self.getOpenRequests(inboxFlag=True, options={"key": wf})
+        if inboxData:
+            updateParams = {self.eleKey: {"OpenForNewData": False}}
+            self.inboxDB.updateBulkDocuments(inboxData, updateParams)
+
+        # now update all of the workqueue elements
         nonCancelableElements = ['Done', 'CancelRequested', 'Canceled', 'Failed']
         data = self.db.loadView('WorkQueue', 'elementsDetailByWorkflowAndStatus',
                                 {'startkey': [wf], 'endkey': [wf, {}],
@@ -243,6 +257,41 @@ class WorkQueue(object):
             wmspec.setPriority(priority)
             dummy_values = {'name': wmspec.name()}
             wmspec.saveCouch(self.hostWithAuth, self.db.name, dummy_values)
+        return
+
+    def updateElementsByWorkflow(self, workload, updateParams, status=None):
+        """
+        Update all available WorkQueue elements of a given workflow  with a set
+        of arguments provided through the `updateParams` dictionary
+        :param workload:     A workflow spec
+        :param updateParams: A dictionary with parameters  to be updated
+        :param status:       A list of allowed WorkQueue elements statuses to be considered for updating
+                             Default: None - do not filter by status
+        :return:             No value, raises exceptions from internal methods in case of errors.
+        """
+        # Fetch the whole view with Workqueue elements per given workflow
+        wfName = workload.name()
+        data = self.db.loadView('WorkQueue', 'elementsDetailByWorkflowAndStatus',
+                                {'startkey': [wfName], 'endkey': [wfName, {}],
+                                 'reduce': False})
+
+        # Fetch only a list of WorkQueue element Ids && Filter them by allowed status
+        if status:
+            elementsToUpdate = [x['id'] for x in data.get('rows', []) if x['value']['Status'] in status]
+        else:
+            elementsToUpdate = [x['id'] for x in data.get('rows', [])]
+
+        # Update all WorkQueue elements with the parameters provided in a single push
+        if elementsToUpdate:
+            self.updateElements(*elementsToUpdate, **updateParams)
+
+        # Update the spec, if it exists
+        if self.db.documentExists(wfName):
+            # Update all workload parameters based on the full reqArgs dictionary
+            workload.updateWorkloadArgs(updateParams)
+            # Commit the changes of the current workload object to the database:
+            metadata = {'name': wfName}
+            workload.saveCouch(self.hostWithAuth, self.db.name, metadata=metadata)
         return
 
     def getWorkflowNames(self, inboxFlag=False):
@@ -280,6 +329,32 @@ class WorkQueue(object):
                 deleted += len(ids)
         return deleted
 
+    def getWQElementsByWorkflow(self, workflowNames, inboxFlag=False):
+        """
+        Get workqueue elements which belongs to a given workflow name(s)
+        :param workflowNames: The workflow name for which we try to fetch the WQE elemtns for (could be a list of names as well)
+        :param inboxFlag:     A flag to switch quering the inboxDB as well (default: False)
+        :return:              A list of WQEs
+        """
+        if inboxFlag:
+            couchdb = self.inboxDB
+        else:
+            couchdb = self.db
+
+        if not isinstance(workflowNames, list):
+            workflowNames = [workflowNames]
+
+        options = {}
+        options["stale"] = "ok"
+        options["reduce"] = False
+        options['include_docs'] = True
+
+        data = couchdb.loadView("WorkQueue", "elementsByWorkflow", options, workflowNames)
+        wqeList=[]
+        for wqe in data['rows']:
+            wqeList.append(CouchWorkQueueElement.fromDocument(couchdb, wqe['doc']))
+        return wqeList
+
     def getElementsCountAndJobsByWorkflow(self, inboxFlag=False, stale=True):
         """Get the number of elements and jobs by status and workflow"""
         if inboxFlag:
@@ -296,7 +371,6 @@ class WorkQueue(object):
                                                 'Jobs': x['value']['sum']}
         return result
 
-
     def _retrieveWorkflowStatus(self, data):
         workflowsStatus = {}
 
@@ -306,7 +380,6 @@ class WorkQueue(object):
             if status:
                 workflowsStatus[workflow] = status
         return workflowsStatus
-
 
     def getWorkflowStatusFromWQE(self, stale=True):
         """
@@ -403,3 +476,17 @@ class WorkQueue(object):
                 result[x['key']].append(x['doc'])
 
         return result
+
+    def getOpenRequests(self, inboxFlag=False, options=None):
+        """
+        Return workflow names that are still opened for new
+        data in workqueue
+        :param inboxFlag: boolean to select the *_inbox db
+        :param options: a dictionary that supports a few view parameters
+        :return: a list with unique request names
+        """
+        options = options or {}
+        options.setdefault("stale", "update_after")
+        db = self.inboxDB if inboxFlag else self.db
+        data = db.loadView('WorkQueue', 'openRequests', options)
+        return [x['key'] for x in data.get('rows', [])]

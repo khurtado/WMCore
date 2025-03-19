@@ -4,9 +4,9 @@ Script for killing a workflow: delete from LQ, delete in WMBS and set cancelled 
 This has to be executed in each agent the workflow is running in (Agent Level)
 
 """
-from __future__ import print_function
 from builtins import str
-import os, sys
+import os
+import sys
 from WMCore.Configuration import loadConfigurationFile
 from WMCore.WorkQueue.WorkQueueBackend import WorkQueueBackend
 from WMCore.WMInit import connectToDB
@@ -16,12 +16,8 @@ def killWorkflowAgent(WorkflowName):
     """
     Cancel work for a given workflow - delete in wmbs, delete from workqueue db, set canceled in inbox
     """    
-    # get configuration file path
-    if "WMAGENT_CONFIG" not in os.environ:
-        os.environ['WMAGENT_CONFIG'] = '/data/srv/wmagent/current/config/wmagent/config.py'
-    
-    # load config
-    wmConfig = loadConfigurationFile(os.environ['WMAGENT_CONFIG'])
+    # get configuration file path and load it
+    wmConfig = loadConfigurationFile(os.environ.get('WMA_CONFIG_FILE', '/data/srv/wmagent/current/config/config.py'))
     wqManager = wmConfig.section_('WorkQueueManager')
     
     couchUrl = wqManager.couchurl

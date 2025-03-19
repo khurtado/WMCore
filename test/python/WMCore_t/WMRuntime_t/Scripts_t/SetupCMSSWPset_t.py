@@ -5,12 +5,10 @@ _SetupCMSSWPset_t.py
 Tests for the PSet configuration code.
 
 """
-from __future__ import print_function
 
-from future.utils import viewvalues
+
 from builtins import zip
 
-import imp
 import unittest
 import os
 import sys
@@ -27,6 +25,15 @@ from WMCore.Storage.SiteLocalConfig import loadSiteLocalConfig
 from WMQuality.TestInit import TestInit
 import WMCore.WMBase
 
+def isAlma9Node():
+    """
+    Detect if we are in an Alma9 node
+    """
+    with open("/etc/redhat-release", "r") as f:
+        l = f.readline()
+        if "AlmaLinux release 9" in l:
+            return True
+    return False
 
 class SetupCMSSWPsetTest(unittest.TestCase):
     def setUp(self):
@@ -59,7 +66,10 @@ class SetupCMSSWPsetTest(unittest.TestCase):
         newStepHelper.setStepType("CMSSW")
         newStepHelper.setGlobalTag("SomeGlobalTag")
         newStepHelper.data.application.section_("setup")
-        newStepHelper.cmsswSetup("CMSSW_11_0_2", scramArch=['slc7_amd64_gcc820'])
+        if isAlma9Node(): 
+            newStepHelper.cmsswSetup("CMSSW_14_0_17", scramArch=['el9_amd64_gcc12'])
+        else:
+            newStepHelper.cmsswSetup("CMSSW_11_0_2", scramArch=['slc7_amd64_gcc820'])
 
         return newStepHelper
 
@@ -98,6 +108,24 @@ class SetupCMSSWPsetTest(unittest.TestCase):
 
         return pset
 
+    def getMaxEventsFromPset(self, pSet):
+        """
+        Get the max events value from pset
+        :pset PSet file
+        :return max events (int)
+        """
+        if hasattr(pSet.maxEvents.input, '_value'):
+            return getattr(pSet.maxEvents.input, '_value')
+        else:
+            for attr in dir(pSet.maxEvents.input):
+                if '_value' in attr:
+                    x = getattr(pSet.maxEvents.input, attr)
+                    if hasattr(x, '_value'):
+                        return getattr(x, '_value')
+
+        # If value is not found, return None
+        return None
+
     def testPSetFixup(self):
         """
         _testPSetFixup_
@@ -120,7 +148,7 @@ class SetupCMSSWPsetTest(unittest.TestCase):
 
         self.assertTrue(hasattr(fixedPSet.source, 'fileNames'))
         self.assertTrue(hasattr(fixedPSet.source, 'secondaryFileNames'))
-        self.assertEqual(fixedPSet.maxEvents.input._value, -1,
+        self.assertEqual(self.getMaxEventsFromPset(fixedPSet), -1,
                          "Error: Wrong maxEvents.")
 
     def testEventsPerLumi(self):
@@ -147,7 +175,7 @@ class SetupCMSSWPsetTest(unittest.TestCase):
         self.assertTrue(hasattr(fixedPSet.source, 'secondaryFileNames'))
         self.assertEqual(fixedPSet.source.numberEventsInLuminosityBlock._value,
                          500, "Error: Wrong number of events per luminosity block")
-        self.assertEqual(fixedPSet.maxEvents.input._value, -1,
+        self.assertEqual(self.getMaxEventsFromPset(fixedPSet), -1,
                          "Error: Wrong maxEvents.")
 
     def testChainedProcesing(self):
@@ -170,14 +198,8 @@ class SetupCMSSWPsetTest(unittest.TestCase):
         fixedPSet = self.loadProcessFromPSet(setupScript.stepSpace.location)
 
         # test if the overriden TFC is right
-        print("DEBUG override: {0}".format(setupScript.step.data.application.overrideCatalog))
-        self.assertTrue(hasattr(setupScript.step.data.application, "overrideCatalog"),
-                        "Error: overriden TFC was not set")
-        tfc = loadTFC(setupScript.step.data.application.overrideCatalog)
-        inputFile = "../my_first_step/my_input_module.root"
-        self.assertEqual(tfc.matchPFN("direct", inputFile), inputFile)
-        self.assertEqual(tfc.matchLFN("direct", inputFile), inputFile)
-        self.assertTrue(hasattr(fixedPSet.source, 'fileNames'))
+        self.assertFalse(hasattr(setupScript.step.data.application, "overrideCatalog"),
+                        "We no longer override the TFC, instead only make a PSet tweak!")
 
 
     def testPileupSetup(self):
@@ -285,7 +307,7 @@ class SetupCMSSWPsetTest(unittest.TestCase):
         """
         # consider only locally available files
         filesInConfigDict = []
-        for v in viewvalues(pileupSubDict):
+        for v in pileupSubDict.values():
             if seLocalName in v["phedexNodeNames"]:
                 filesInConfigDict.extend(v["FileList"])
 

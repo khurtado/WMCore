@@ -10,7 +10,6 @@ This script will mark the global workqueue elements - for a given
 workflow - as CancelRequested, such that the agents can proceed
 and acknowledge it, moving elements to status Canceled.
 """
-from __future__ import print_function
 
 import os
 import sys
@@ -26,12 +25,8 @@ def main():
         sys.exit(0)
     wflowName = args[0]
 
-    # get configuration file path
-    if "WMAGENT_CONFIG" not in os.environ:
-        os.environ['WMAGENT_CONFIG'] = '/data/srv/wmagent/current/config/wmagent/config.py'
-
-    # load config
-    wmConfig = loadConfigurationFile(os.environ['WMAGENT_CONFIG'])
+    # get configuration file path and load it
+    wmConfig = loadConfigurationFile(os.environ.get('WMA_CONFIG_FILE', '/data/srv/wmagent/current/config/config.py'))
 
     gqService = WorkQueue(wmConfig.WorkloadSummary.couchurl,
                           wmConfig.WorkQueueManager.dbname)

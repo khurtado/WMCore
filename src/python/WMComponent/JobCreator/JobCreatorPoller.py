@@ -145,6 +145,8 @@ def saveJob(job, thisJobNumber, **kwargs):
     job['requiresGPU'] = kwargs['requiresGPU']
     job['gpuRequirements'] = kwargs['gpuRequirements']
     job['requestType'] = kwargs['requestType']
+    job['physicsTaskType'] = kwargs['physicsTaskType']
+    job['campaignName'] = kwargs['campaignName']
 
     with open(os.path.join(cacheDir, 'job.pkl'), 'wb') as output:
         pickle.dump(job, output, HIGHEST_PICKLE_PROTOCOL)
@@ -464,7 +466,7 @@ class JobCreatorPoller(BaseWorkerThread):
             except Exception as ex:
                 msg = "Had failure loading generators for subscription %i\n" % (subscriptionID)
                 msg += "Exception: %s\n" % str(ex)
-                msg += "Passing over this error.  It will reoccur next interation!\n"
+                msg += "Passing over this error.  It will reoccur next iteration!\n"
                 msg += "Please check or remove this subscription!\n"
                 logging.error(msg)
                 continue
@@ -539,7 +541,9 @@ class JobCreatorPoller(BaseWorkerThread):
                                'scramArch': wmTask.getScramArch(),
                                'agentNumber': self.agentNumber,
                                'agentName': self.agentName,
-                               'allowOpportunistic': allowOpport}
+                               'allowOpportunistic': allowOpport,
+                               'campaignName': wmTask.getCampaignName(),
+                               'physicsTaskType': wmTask.getPhysicsTaskType()}
 
                 tempSubscription = Subscription(id=wmbsSubscription['id'])
 
@@ -688,8 +692,8 @@ class JobCreatorPoller(BaseWorkerThread):
         fjrsToSave = []
         for failedJob in createFailedJobs:
             report = Report()
-            report.addError("CreationFailure", 99305, "CreationFailure",
-                            failedJob.get("failedReason", WM_JOB_ERROR_CODES[99305]))
+            report.addError("CreationFailure", failedJob["failedErrCode"], "CreationFailure",
+                            failedJob.get("failedReason", WM_JOB_ERROR_CODES[failedJob["failedErrCode"]]))
             jobCache = failedJob.getCache()
             try:
                 fjrPath = os.path.join(jobCache, "Report.0.pkl")

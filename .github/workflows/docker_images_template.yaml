@@ -1,0 +1,54 @@
+# Reusable workflow to setup a specific WMCore component for pip
+
+on:
+  workflow_call:
+    inputs:
+      wmcore_component:
+        required: true
+        type: string
+    secrets:
+      cern_user:
+        required: true
+      cern_token:
+        required: true
+
+jobs:
+  build_images_from_template:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE_NAME: ${{inputs.wmcore_component}}
+    steps:
+      - name: Get the Ref
+        id: get-ref
+        uses: ankitvgupta/ref-to-tag-action@master
+        with:
+          ref: ${{ github.ref }}
+          head_ref: ${{ github.head_ref }}
+
+      - name: Login to registry.cern.ch
+        uses: docker/login-action@v2
+        with:
+          registry: registry.cern.ch
+          username: ${{ secrets.cern_user }}
+          password: ${{ secrets.cern_token }}
+
+      - name: Build and publish docker image
+        env:
+          PYPI_TAG: ${{steps.get-ref.outputs.tag}}
+          CERN_REGISTRY: registry.cern.ch
+        run: |
+          echo "Building service: ${SERVICE_NAME}, with tag: ${PYPI_TAG}"
+          git clone --filter=blob:none --no-checkout https://github.com/dmwm/CMSKubernetes.git \
+            && cd CMSKubernetes && git sparse-checkout set --cone && git checkout master \
+            && git sparse-checkout set docker/pypi/${SERVICE_NAME}
+          cd docker/pypi/${SERVICE_NAME}
+          echo "Retrieved Dockerfile with content:"
+          cat Dockerfile
+          echo "Sleeping 5min to ensure that PyPi packages are available..."
+          sleep 300
+          curl -ksLO https://raw.githubusercontent.com/dmwm/WMCore/master/bin/docker.sh
+          chmod +x docker.sh
+          echo "build new image"
+          ./docker.sh build ${SERVICE_NAME} ${PYPI_TAG} ${CERN_REGISTRY}
+          echo "push new image"
+          ./docker.sh push ${SERVICE_NAME} ${PYPI_TAG} ${CERN_REGISTRY}

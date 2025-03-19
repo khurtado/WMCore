@@ -10,14 +10,12 @@ import os
 import os.path
 import random
 import shutil
-import socket
-import sys
 # Basic libraries
 import unittest
 
+import sys
 # from WMCore.WMSpec.StdSpecs.ReReco  import rerecoWorkload, getTestArguments
-from WMCore_t.WMSpec_t.TestSpec import testWorkload
-from nose.plugins.attrib import attr
+from WMCore_t.WMSpec_t.TestSpec import createTestWorkload
 
 import WMCore.WMRuntime.Bootstrap as Bootstrap
 # DataStructs
@@ -62,7 +60,6 @@ def miniStartup(thisDir=os.getcwd()):
     Or run this in subprocess
 
     """
-
     Bootstrap.setupLogging(thisDir)
     job = Bootstrap.loadJobDefinition()
     task = Bootstrap.loadTask(job)
@@ -76,7 +73,7 @@ def miniStartup(thisDir=os.getcwd()):
     task.completeTask(jobLocation=os.path.join(thisDir, 'WMTaskSpace'),
                       reportName="Report.0.pkl")
 
-    if monitor.isAlive():
+    if monitor.is_alive():
         monitor.shutdown()
 
     return
@@ -88,9 +85,6 @@ class RuntimeTest(unittest.TestCase):
 
     A unittest to test the WMRuntime/WMSpec/Storage/etc tree
     """
-
-    # This is an integration test
-    __integration__ = "Any old bollocks"
 
     def setUp(self):
         """
@@ -109,6 +103,7 @@ class RuntimeTest(unittest.TestCase):
         self.unpackDir = None
         self.initialDir = os.getcwd()
         self.origPath = sys.path
+        self.thisDirPath = os.path.dirname(__file__)
 
         # Create some dirs
         os.makedirs(os.path.join(self.testDir, 'packages'))
@@ -132,10 +127,8 @@ class RuntimeTest(unittest.TestCase):
 
         return
 
-    def createTestWorkload(self, workloadName='Test', emulator=True):
+    def setupTestWorkload(self, workloadName='Test', emulator=True):
         """
-        _createTestWorkload_
-
         Creates a test workload for us to run on, hold the basic necessities.
         """
 
@@ -146,16 +139,18 @@ class RuntimeTest(unittest.TestCase):
         # workload = rerecoWorkload("Tier1ReReco", arguments)
         # rereco = workload.getTask("ReReco")
 
-        workload = testWorkload(emulation=emulator)
+        workload = createTestWorkload(emulation=emulator)
         rereco = workload.getTask("ReReco")
 
         # Set environment and site-local-config
         siteConfigPath = os.path.join(workloadDir, 'SITECONF/local/JobConfig/')
         if not os.path.exists(siteConfigPath):
             os.makedirs(siteConfigPath)
-        shutil.copy('site-local-config.xml', siteConfigPath)
+        shutil.copy(os.path.join(self.thisDirPath, 'site-local-config.xml'), siteConfigPath)
+        shutil.copy(os.path.join(self.thisDirPath, 'storage.json'), os.path.join(siteConfigPath, '..'))
         environment = rereco.data.section_('environment')
         environment.CMS_PATH = workloadDir
+        environment.SITECONFIG_PATH = os.path.join(workloadDir, 'SITECONF/local')
 
         taskMaker = TaskMaker(workload, workloadDir)
         taskMaker.skipSubscription = True
@@ -316,15 +311,16 @@ class RuntimeTest(unittest.TestCase):
             # Scream, run around in panic, blow up machine
             print("About to run jobs")
             print(taskDir)
-            miniStartup(dir=taskDir)
-
+            # SITECONFIG_PATH is not available here so set it up so that site config can be loaded in Bootstrap.createInitialReport inside miniStartup
+            os.environ['SITECONFIG_PATH'] = os.path.realpath(
+                os.path.join(taskDir, '../../../basicWorkload/SITECONF/local'))
+            miniStartup(thisDir=taskDir)
             # When exiting, go back to where you started
             os.chdir(self.initialDir)
             sys.path.remove(taskDir)
 
         return
 
-    @attr('integration')
     def testA_CreateWorkload(self):
         """
         _CreateWorkload_
@@ -335,7 +331,7 @@ class RuntimeTest(unittest.TestCase):
         """
 
         workloadName = 'basicWorkload'
-        workload = self.createTestWorkload(workloadName=workloadName)
+        workload = self.setupTestWorkload(workloadName=workloadName)
 
         self.createWMBSComponents(workload=workload)
 
@@ -350,7 +346,7 @@ class RuntimeTest(unittest.TestCase):
 
         # Does it have the right directories?
         dirList = os.listdir(workloadPath)
-        self.assertEqual(dirList, ['WMSandbox', 'TestWorkload-Sandbox.tar.bz2'])
+        self.assertCountEqual(dirList, ['WMSandbox', 'TestWorkload-Sandbox.tar.bz2'])
         dirList = os.listdir(os.path.join(workloadPath, 'WMSandbox'))
         for taskName in taskNames:
             self.assertTrue(taskName in dirList)
@@ -388,7 +384,6 @@ class RuntimeTest(unittest.TestCase):
         # And we're done.
         # Assume if we got this far everything is good
 
-
         # At the end, copy the directory
         # if os.path.exists('tmpDir'):
         #    shutil.rmtree('tmpDir')
@@ -396,7 +391,6 @@ class RuntimeTest(unittest.TestCase):
 
         return
 
-    @attr('integration')
     def testB_EmulatorTest(self):
         """
         _EmulatorTest_
@@ -409,7 +403,7 @@ class RuntimeTest(unittest.TestCase):
 
         # Assume all this works, because we tested it in testA
         workloadName = 'basicWorkload'
-        workload = self.createTestWorkload(workloadName=workloadName)
+        workload = self.setupTestWorkload(workloadName=workloadName)
 
         self.createWMBSComponents(workload=workload)
 
@@ -424,10 +418,8 @@ class RuntimeTest(unittest.TestCase):
         cmsReport = report.data.cmsRun1
 
         # Now validate the report
-        self.assertEqual(report.data.ceName, socket.gethostname())
-        self.assertEqual(report.data.pnn, 'T1_US_FNAL_Disk')
-        self.assertEqual(report.data.siteName, 'T1_US_FNAL')
-        self.assertEqual(report.data.hostName, socket.gethostname())
+        self.assertEqual(report.getSiteName(), 'T1_US_FNAL')
+        # self.assertEqual(report.data.hostName, socket.gethostname())
         self.assertTrue(report.data.completed)
 
         # Should have status 0 (emulator job)
@@ -441,7 +433,6 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(cmsReport.output.TestOutputModule.files.fileCount, 1)
 
         # So, um, I guess we're done
-
 
         # At the end, copy the directory
         # if os.path.exists('tmpDir'):

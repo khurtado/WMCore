@@ -119,6 +119,8 @@ class WorkQueue(WorkQueueBase):
 
         self.params.setdefault('QueueDepth', 1)  # when less than this locally
         self.params.setdefault('WorkPerCycle', 100)
+        self.params.setdefault('RowsPerSlice', 2500)
+        self.params.setdefault('MaxRowsPerCycle', 50000)
         self.params.setdefault('LocationRefreshInterval', 600)
         self.params.setdefault('FullLocationRefreshInterval', 7200)
         self.params.setdefault('TrackLocationOrSubscription', 'location')
@@ -310,13 +312,16 @@ class WorkQueue(WorkQueueBase):
         """
         excludeWorkflows = excludeWorkflows or []
         results = []
-        numElems = self.params['WorkPerCycle']
         if not self.backend.isAvailable():
             self.logger.warning('Backend busy or down: skipping fetching of work')
             return results
 
+        # TODO AMR: perhaps numElems limit should be removed for LQ -> WMBS acquisition
         matches, _ = self.backend.availableWork(jobSlots, siteJobCounts,
-                                                excludeWorkflows=excludeWorkflows, numElems=numElems)
+                                                excludeWorkflows=excludeWorkflows,
+                                                numElems=self.params['WorkPerCycle'],
+                                                rowsPerSlice=self.params['RowsPerSlice'],
+                                                maxRows=self.params['MaxRowsPerCycle'])
 
         self.logger.info('Got %i elements matching the constraints', len(matches))
         if not matches:
@@ -344,7 +349,7 @@ class WorkQueue(WorkQueueBase):
                 except Exception as ex:
                     msg = "%s, %s: \n" % (wmspec.name(), list(match['Inputs']))
                     msg += "failed to retrieve data from DBS/Rucio in LQ: \n%s" % str(ex)
-                    self.logger.error(msg)
+                    self.logger.exception(msg)
                     self.logdb.post(wmspec.name(), msg, 'error')
                     continue
 
@@ -382,22 +387,27 @@ class WorkQueue(WorkQueueBase):
         return DBSReader(dbsUrl)
 
     def _getDBSDataset(self, match):
-        """Get DBS info for this dataset"""
-        tmpDsetDict = {}
+        """
+        Given a workqueue element with Dataset start policy, find all blocks
+        with valid files and resolve their location in Rucio.
+        :param match: workqueue element dictionary
+        :return: a tuple of the dataset name and its files and RSEs
+        """
+        dbsDatasetDict = {'Files': [], 'PhEDExNodeNames': []}
         dbs = self._getDbs(match['Dbs'])
         datasetName = list(match['Inputs'])[0]
 
         blocks = dbs.listFileBlocks(datasetName)
         for blockName in blocks:
             blockSummary = dbs.getFileBlock(blockName)
+            if not blockSummary['Files']:
+                self.logger.warning("Block name %s has no valid files. Skipping it.", blockName)
+                continue
             blockSummary['PhEDExNodeNames'] = self.rucio.getDataLockedAndAvailable(name=blockName,
                                                                                    account=self.params['rucioAccount'])
-            tmpDsetDict[blockName] = blockSummary
+            dbsDatasetDict['Files'].extend(blockSummary['Files'])
+            dbsDatasetDict['PhEDExNodeNames'].extend(blockSummary['PhEDExNodeNames'])
 
-        dbsDatasetDict = {'Files': [], 'PhEDExNodeNames': []}
-        dbsDatasetDict['Files'] = [f for block in listvalues(tmpDsetDict) for f in block['Files']]
-        dbsDatasetDict['PhEDExNodeNames'].extend(
-                [f for block in listvalues(tmpDsetDict) for f in block['PhEDExNodeNames']])
         dbsDatasetDict['PhEDExNodeNames'] = list(set(dbsDatasetDict['PhEDExNodeNames']))
 
         return datasetName, dbsDatasetDict
@@ -474,10 +484,14 @@ class WorkQueue(WorkQueueBase):
             ele['WMBSUrl'] = self.params["WMBSUrl"]
             workByRequest.setdefault(ele['RequestName'], 0)
             workByRequest[ele['RequestName']] += 1
-        work = self.parent_queue.saveElements(*elements)
-        self.logger.info("Assigned work to the child queue for:")
-        for reqName, numElem in viewitems(workByRequest):
+        self.logger.info("Setting GQE status to 'Negotiating' and assigning to this child queue for:")
+        for reqName, numElem in workByRequest.items():
             self.logger.info("    %d elements for: %s", numElem, reqName)
+
+        work = self.parent_queue.saveElements(*elements)
+        self.logger.info("GQE successfully saved for:")
+        for ele in work:
+            self.logger.info("    %s under GQE id: %s", ele['RequestName'], ele.id)
         return work
 
     def doneWork(self, elementIDs=None, SubscriptionId=None, WorkflowName=None):
@@ -584,7 +598,7 @@ class WorkQueue(WorkQueueBase):
             if self.params.get('cancelGraceTime', -1) > 0 and elements:
                 last_update = max([float(x.updatetime) for x in elements])
                 if (time.time() - last_update) > self.params['cancelGraceTime']:
-                    self.logger.info("%s cancelation has stalled, mark as finished", elements[0]['RequestName'])
+                    self.logger.info("%s cancellation has stalled, mark as finished", elements[0]['RequestName'])
                     # Don't update as fails sometimes due to conflicts (#3856)
                     for x in elements:
                         if not x.inEndState():
@@ -825,9 +839,11 @@ class WorkQueue(WorkQueueBase):
         return (resources, jobCounts)
 
     def getAvailableWorkfromParent(self, resources, jobCounts, printFlag=False):
-        numElems = self.params['WorkPerCycle']
         self.logger.info("Going to fetch work from the parent queue: %s", self.parent_queue.queueUrl)
-        work, _ = self.parent_queue.availableWork(resources, jobCounts, self.params['Team'], numElems=numElems)
+        work, _ = self.parent_queue.availableWork(resources, jobCounts, self.params['Team'],
+                                                  numElems=self.params['WorkPerCycle'],
+                                                  rowsPerSlice=self.params['RowsPerSlice'],
+                                                  maxRows=self.params['MaxRowsPerCycle'])
         if not work:
             self._printLog('No available work in parent queue.', printFlag, "warning")
         return work
@@ -1044,7 +1060,7 @@ class WorkQueue(WorkQueueBase):
         if not rucioObj:
             rucioObj = self.rucio
 
-        totalUnits = []
+        totalUnits, rejectedWork, badWork = [], [], []
         # split each top level task into constituent work elements
         # get the acdc server and db name
         for topLevelTask in wmspec.taskIterator():

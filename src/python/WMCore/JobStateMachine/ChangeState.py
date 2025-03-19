@@ -4,15 +4,15 @@ _ChangeState_
 
 Propagate a job from one state to another.
 """
-
+import json
+import sys
 from builtins import str
 import logging
 import re
 import time
-import traceback
 
 from WMCore.DataStructs.WMObject import WMObject
-from WMCore.Database.CMSCouch import CouchNotFoundError, CouchError
+from WMCore.Database.CMSCouch import CouchNotFoundError, CouchError, CouchRequestTooLargeError
 from WMCore.Database.CMSCouch import CouchServer
 from WMCore.JobStateMachine.SummaryDB import updateSummaryDB
 from WMCore.JobStateMachine.Transitions import Transitions
@@ -60,6 +60,74 @@ def discardConflictingDocument(couchDbInstance, data, result):
         return result
 
 
+def shrinkLargeFJR(couchDbInstance, sizeLimit):
+    """
+    Look at the CouchDB database queue and empty documents
+    with a 'fwjr' field larger than sizeLimit.
+    :param couchDbInstance: couchdb database instance
+    :param sizeLimit: integer with the limit number of bytes
+    :return: None
+    """
+    for doc in couchDbInstance._queue:
+        if sys.getsizeof(json.dumps(doc)) > sizeLimit:
+            if 'fwjr' in doc:
+                errMsg = f"The 'fwjr' attribute for jobid: {doc.get('jobid')} will be empty "
+                errMsg += f"because it is larger than the configured limit: {sizeLimit} bytes."
+                logging.warning(errMsg)
+                doc['fwjr'] = dict()
+            else:
+                errMsg = f"Found a too large Couch document for job id: {doc.get('jobid')}, which is "
+                errMsg += f"actually missing the 'fwjr' attribute. Current limit: {sizeLimit} bytes."
+                logging.error(errMsg)
+    return
+
+
+def shrinkLargeSummary(couchDbInstance, sizeLimit):
+    """
+    Look at the CouchDB database queue and truncate/reset some potentially
+    large fields, in they are larger than the max CouchDB limit size.
+    :param couchDbInstance: couchdb database instance
+    :param sizeLimit: integer with the limit number of bytes
+    :return: None
+
+    NOTE that the 'errors' dictionary has the following format (with different
+    top level keys for different jobs):
+    {
+        "cmsRun1": [{
+            "type": "Misc. CMSSW error",
+            "details": "Error in CMSSW: 99109\n[Er...."
+            "exitCode": 99109}],
+        "logArch1"": [],
+        "stageOut1"": []},
+    """
+    for doc in couchDbInstance._queue:
+        if sys.getsizeof(json.dumps(doc)) < sizeLimit:
+            # document is within the size limits, go to the next one
+            continue
+        # otherwise, scan a few fields known-to-be-large and reduce/reset them
+        for innerAttr in ["errors", "inputfiles", "lumis"]:
+            fieldBytes = sys.getsizeof(json.dumps(doc[innerAttr]))
+            if fieldBytes > sizeLimit:
+                msg = f"Job summary id: {doc['_id']}, WMBS id: {doc['wmbsid']} "
+                msg += f"has {fieldBytes} bytes under the attr: {innerAttr}. Truncating it.."
+                logging.warning(msg)
+                if innerAttr == "errors":
+                    # keep only the first 5k characters of the error detail
+                    for stepName in doc[innerAttr]:
+                        for error in doc[innerAttr][stepName]:
+                            if "details" in error:
+                                error["details"] = error["details"][:5000]
+                                error["details"] += "... error message truncated ..."
+                elif innerAttr == "inputfiles" and len(doc[innerAttr]) > 500:
+                    # keep only the first 500 input files
+                    doc[innerAttr] = doc[innerAttr][:500]
+                elif innerAttr == "lumis":
+                    # keep the same data type, but reset it
+                    doc[innerAttr] = type(doc[innerAttr])()
+                else:
+                    logging.error("Unexpected data type: %s", type(doc[innerAttr]))
+
+
 def getDataFromSpecFile(specFile):
     workload = WMWorkloadHelper()
     workload.load(specFile)
@@ -89,6 +157,8 @@ class ChangeState(WMObject, WMConnectionBase):
         self.jsumdatabase = None
         self.statsumdatabase = None
 
+        # max total number of documents to be committed in the same Couch operation
+        self.maxBulkCommit = getattr(self.config.JobStateMachine, 'maxBulkCommitDocs', 250)
         self.couchdb = CouchServer(self.config.JobStateMachine.couchurl)
         self._connectDatabases()
 
@@ -101,6 +171,7 @@ class ChangeState(WMObject, WMConnectionBase):
         self.getWorkflowSpecDAO = self.daofactory("Workflow.GetSpecAndNameFromTask")
 
         self.maxUploadedInputFiles = getattr(self.config.JobStateMachine, 'maxFWJRInputFiles', 1000)
+        self.fwjrLimitSize = getattr(self.config.JobStateMachine, 'fwjrLimitSize', 8 * 1000**2)
         self.workloadCache = {}
         return
 
@@ -110,7 +181,8 @@ class ChangeState(WMObject, WMConnectionBase):
         """
         if not hasattr(self, 'jobsdatabase') or self.jobsdatabase is None:
             try:
-                self.jobsdatabase = self.couchdb.connectDatabase("%s/jobs" % self.dbname, size=250)
+                self.jobsdatabase = self.couchdb.connectDatabase("%s/jobs" % self.dbname,
+                                                                 size=self.maxBulkCommit)
             except Exception as ex:
                 logging.error("Error connecting to couch db '%s/jobs': %s", self.dbname, str(ex))
                 self.jobsdatabase = None
@@ -118,7 +190,8 @@ class ChangeState(WMObject, WMConnectionBase):
 
         if not hasattr(self, 'fwjrdatabase') or self.fwjrdatabase is None:
             try:
-                self.fwjrdatabase = self.couchdb.connectDatabase("%s/fwjrs" % self.dbname, size=250)
+                self.fwjrdatabase = self.couchdb.connectDatabase("%s/fwjrs" % self.dbname,
+                                                                 size=self.maxBulkCommit)
             except Exception as ex:
                 logging.error("Error connecting to couch db '%s/fwjrs': %s", self.dbname, str(ex))
                 self.fwjrdatabase = None
@@ -127,7 +200,8 @@ class ChangeState(WMObject, WMConnectionBase):
         if not hasattr(self, 'jsumdatabase') or self.jsumdatabase is None:
             dbname = getattr(self.config.JobStateMachine, 'jobSummaryDBName')
             try:
-                self.jsumdatabase = self.couchdb.connectDatabase(dbname, size=250)
+                self.jsumdatabase = self.couchdb.connectDatabase(dbname,
+                                                                 size=self.maxBulkCommit)
             except Exception as ex:
                 logging.error("Error connecting to couch db '%s': %s", dbname, str(ex))
                 self.jsumdatabase = None
@@ -136,7 +210,8 @@ class ChangeState(WMObject, WMConnectionBase):
         if not hasattr(self, 'statsumdatabase') or self.statsumdatabase is None:
             dbname = getattr(self.config.JobStateMachine, 'summaryStatsDBName')
             try:
-                self.statsumdatabase = self.couchdb.connectDatabase(dbname, size=250)
+                self.statsumdatabase = self.couchdb.connectDatabase(dbname,
+                                                                    size=self.maxBulkCommit)
             except Exception as ex:
                 logging.error("Error connecting to couch db '%s': %s", dbname, str(ex))
                 self.jsumdatabase = None
@@ -181,8 +256,7 @@ class ChangeState(WMObject, WMConnectionBase):
             logging.exception(msg)
             raise
         except Exception as ex:
-            logging.error("Error updating job in couch: %s", str(ex))
-            logging.error(traceback.format_exc())
+            logging.exception("Error updating job in couch: %s", str(ex))
 
         return
 
@@ -275,6 +349,8 @@ class ChangeState(WMObject, WMConnectionBase):
 
                 couchRecordsToUpdate.append({"jobid": job["id"],
                                              "couchid": jobDocument["_id"]})
+                if self.jobsdatabase.getQueueSize() >= self.maxBulkCommit:
+                    self.jobsdatabase.commit(callback=discardConflictingDocument)
                 self.jobsdatabase.queue(jobDocument, callback=discardConflictingDocument)
             else:
                 # We send a PUT request to the stateTransition update handler.
@@ -318,7 +394,7 @@ class ChangeState(WMObject, WMConnectionBase):
                                                                  getDataFromSpecFile(
                                                                      self.getWorkflowSpecDAO.execute(job['task'])[
                                                                          job['task']]['spec']))
-                job['fwjr'].setCampaign(cachedByWorkflow.get('Campaign', ''))
+                job['fwjr'].setCampaign(job.get('campaignName', ''))
                 job['fwjr'].setPrepID(cachedByWorkflow.get(job['task'], ''))
                 # If there are too many input files, strip them out
                 # of the FWJR, as they should already
@@ -356,6 +432,18 @@ class ChangeState(WMObject, WMConnectionBase):
                                 "archivestatus": archStatus,
                                 "fwjr": jsonFWJR,
                                 "type": "fwjr"}
+                if self.fwjrdatabase.getQueueSize() >= self.maxBulkCommit:
+                    try:
+                        # TODO FIXME: https://github.com/dmwm/WMCore/issues/11576
+                        self.fwjrdatabase.commit(callback=discardConflictingDocument)
+                    except CouchRequestTooLargeError as exc:
+                        msg = "Failed to commit bulk of framework job report to CouchDB."
+                        msg += f" Details: {str(exc)}"
+                        logging.warning(msg)
+                        shrinkLargeFJR(self.fwjrdatabase, self.fwjrLimitSize)
+                        # now all the documents should fit in
+                        self.fwjrdatabase.commit(callback=discardConflictingDocument)
+
                 self.fwjrdatabase.queue(fwjrDocument, timestamp=True, callback=discardConflictingDocument)
 
                 updateSummaryDB(self.statsumdatabase, job)
@@ -454,6 +542,19 @@ class ChangeState(WMObject, WMConnectionBase):
                                 jobSummary[prop] = jobSummary[prop] if jobSummary[prop] else currentJobDoc.get(prop, [])
                         except CouchNotFoundError:
                             pass
+
+                    if self.jsumdatabase.getQueueSize() >= self.maxBulkCommit:
+                        try:
+                            # TODO FIXME: https://github.com/dmwm/WMCore/issues/11576
+                            self.jsumdatabase.commit()
+                        except CouchRequestTooLargeError as exc:
+                            msg = "Failed to commit bulk of job summary documents to CouchDB."
+                            msg += f" Details: {str(exc)}"
+                            logging.warning(msg)
+                            shrinkLargeSummary(self.jsumdatabase, self.fwjrLimitSize)
+                            # now all the documents should fit in
+                            self.jsumdatabase.commit()
+
                     self.jsumdatabase.queue(jobSummary, timestamp=True)
 
         if len(couchRecordsToUpdate) > 0:
@@ -461,9 +562,25 @@ class ChangeState(WMObject, WMConnectionBase):
                                      conn=self.getDBConn(),
                                      transaction=self.existingTransaction())
 
+        try:
+            self.fwjrdatabase.commit(callback=discardConflictingDocument)
+        except CouchRequestTooLargeError as exc:
+            msg = "Failed to commit bulk of framework job report to CouchDB."
+            msg += f" Error: {str(exc)}"
+            logging.warning(msg)
+            shrinkLargeFJR(self.fwjrdatabase, self.fwjrLimitSize)
+            # now all the documents should fit in
+            self.fwjrdatabase.commit(callback=discardConflictingDocument)
         self.jobsdatabase.commit(callback=discardConflictingDocument)
-        self.fwjrdatabase.commit(callback=discardConflictingDocument)
-        self.jsumdatabase.commit()
+        try:
+            self.jsumdatabase.commit()
+        except CouchRequestTooLargeError as exc:
+            msg = "Failed to commit bulk of job summary documents to CouchDB."
+            msg += f" Details: {str(exc)}"
+            logging.warning(msg)
+            shrinkLargeSummary(self.jsumdatabase, self.fwjrLimitSize)
+            # now all the documents should fit in
+            self.jsumdatabase.commit()
         return
 
     def persist(self, jobs, newstate, oldstate):
@@ -581,5 +698,4 @@ class ChangeState(WMObject, WMConnectionBase):
                 updateUri += "?location=%s" % (location)
                 self.jobsdatabase.makeRequest(uri=updateUri, type="PUT", decode=False)
         except Exception as ex:
-            logging.error("Error updating job in couch: %s", str(ex))
-            logging.error(traceback.format_exc())
+            logging.exception("Error updating job in couch: %s", str(ex))

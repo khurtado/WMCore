@@ -16,6 +16,7 @@ from WMQuality.Emulators.LogDB.MockLogDB import MockLogDB
 from WMQuality.Emulators.PyCondorAPI.MockPyCondorAPI import MockPyCondorAPI
 from WMQuality.Emulators.ReqMgrAux.MockReqMgrAux import MockReqMgrAux
 from WMQuality.Emulators.RucioClient.MockRucioApi import MockRucioApi
+from WMQuality.Emulators.MSPileup.MockMSPileupAPI import getPileupDocs as mockPileupDocs
 
 
 class EmulatedUnitTestCase(unittest.TestCase):
@@ -27,7 +28,7 @@ class EmulatedUnitTestCase(unittest.TestCase):
     def __init__(self, methodName='runTest', mockDBS=True,
                  mockReqMgrAux=True, mockLogDB=True,
                  mockMemoryCache=True, mockPyCondor=True,
-                 mockCRIC=True, mockRucio=True):
+                 mockCRIC=True, mockRucio=True, mockMSPileup=True):
         self.mockDBS = mockDBS
         self.mockReqMgrAux = mockReqMgrAux
         self.mockLogDB = mockLogDB
@@ -35,7 +36,8 @@ class EmulatedUnitTestCase(unittest.TestCase):
         self.mockPyCondor = mockPyCondor
         self.mockCRIC = mockCRIC
         self.mockRucio = mockRucio
-        super(EmulatedUnitTestCase, self).__init__(methodName)
+        self.mockMSPileup = mockMSPileup
+        super().__init__(methodName)
 
     def setUp(self):
         """
@@ -45,7 +47,7 @@ class EmulatedUnitTestCase(unittest.TestCase):
 
         TODO: parameters to turn off emulators individually
         """
-
+        print("Running setUp with emulated services.")
         if self.mockDBS:
             self.dbsPatchers = []
             patchDBSAt = ["dbs.apis.dbsClient.DbsApi",
@@ -60,7 +62,9 @@ class EmulatedUnitTestCase(unittest.TestCase):
             patchRucioAt = ['WMCore.WorkQueue.WorkQueue.Rucio',
                             'WMCore.WorkQueue.WorkQueueReqMgrInterface.Rucio',
                             'WMCore.WorkQueue.Policy.Start.StartPolicyInterface.Rucio',
+                            'WMCore.MicroService.MSCore.MSCore.Rucio',
                             'WMComponent.RucioInjector.RucioInjectorPoller.Rucio',
+                            'WMComponent.WorkflowUpdater.WorkflowUpdaterPoller.Rucio',
                             'WMCore.WMSpec.Steps.Fetchers.PileupFetcher.Rucio',
                             'WMCore_t.WMSpec_t.Steps_t.Fetchers_t.PileupFetcher_t.Rucio',
                             'WMCore_t.WorkQueue_t.WMBSHelper_t.Rucio']
@@ -102,10 +106,22 @@ class EmulatedUnitTestCase(unittest.TestCase):
             patchCRICAt = ['WMCore.ReqMgr.Tools.cms.CRIC',
                            'WMCore.WorkQueue.WorkQueue.CRIC',
                            'WMCore.WorkQueue.WorkQueueUtils.CRIC',
-                           'WMCore.WorkQueue.Policy.Start.StartPolicyInterface.CRIC']
+                           'WMCore.WorkQueue.Policy.Start.StartPolicyInterface.CRIC',
+                           'WMComponent.AgentStatusWatcher.ResourceControlUpdater.CRIC']
             for module in patchCRICAt:
                 self.cricPatchers.append(mock.patch(module, new=MockCRICApi))
                 self.cricPatchers[-1].start()
                 self.addCleanup(self.cricPatchers[-1].stop)
 
-        return
+        if self.mockMSPileup:
+            self.msPileupPatchers = []
+            patchMSPileupAt = ['WMCore.MicroService.MSTransferor.MSTransferor.getPileupDocs',
+                               'WMCore.WorkQueue.Policy.Start.StartPolicyInterface.getPileupDocs',
+                               'WMCore.WorkQueue.DataLocationMapper.getPileupDocs',
+                               'WMCore.WMSpec.Steps.Fetchers.PileupFetcher.getPileupDocs',
+                               'WMComponent.WorkflowUpdater.WorkflowUpdaterPoller.getPileupDocs',
+                               'WMCore_t.Services_t.MSPileup_t.MSPileupUtils_t.getPileupDocs']
+            for module in patchMSPileupAt:
+                self.msPileupPatchers.append(mock.patch(module, new=mockPileupDocs))
+                self.msPileupPatchers[-1].start()
+                self.addCleanup(self.msPileupPatchers[-1].stop)

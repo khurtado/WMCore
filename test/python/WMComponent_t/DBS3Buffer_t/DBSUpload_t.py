@@ -22,7 +22,7 @@ from WMComponent.DBS3Buffer.DBSBufferBlock import DBSBufferBlock
 from WMComponent.DBS3Buffer.DBSBufferDataset import DBSBufferDataset
 from WMComponent.DBS3Buffer.DBSBufferFile import DBSBufferFile
 from WMComponent.DBS3Buffer.DBSBufferUtil import DBSBufferUtil
-from WMComponent.DBS3Buffer.DBSUploadPoller import DBSUploadPoller, isPassiveError, parseDBSException
+from WMComponent.DBS3Buffer.DBSUploadPoller import DBSUploadPoller, parseDBSException
 from WMCore.DAOFactory import DAOFactory
 from WMCore.DataStructs.Run import Run
 from WMCore.Services.UUIDLib import makeUUID
@@ -120,6 +120,7 @@ class DBSUploadTest(unittest.TestCase):
         config.DBS3Upload.nProcesses = 1
         config.DBS3Upload.dbsWaitTime = 0.1
         config.DBS3Upload.datasetType = "VALID"
+        config.DBS3Upload.uploaderName = "WMAgent"
 
         # added to skip the StepChain parentage setting test
         config.component_("Tier0Feeder")
@@ -414,7 +415,8 @@ class DBSUploadTest(unittest.TestCase):
             blockName = parentFiles[0]["datasetPath"] + "#" + makeUUID()
             dbsBlock = DBSBufferBlock(blockName,
                                       location="malpaquet",
-                                      datasetpath=None)
+                                      datasetpath=None,
+                                      uploader=config.uploaderName)
             dbsBlock.status = "Open"
             dbsBlock.setDataset(parentFiles[0]["datasetPath"], 'data', 'VALID')
             dbsUtil.createBlocks([dbsBlock])
@@ -431,7 +433,8 @@ class DBSUploadTest(unittest.TestCase):
         blockName = childFiles[0]["datasetPath"] + "#" + makeUUID()
         dbsBlock = DBSBufferBlock(blockName,
                                   location="malpaquet",
-                                  datasetpath=None)
+                                  datasetpath=None,
+                                  uploader=config.uploaderName)
         dbsBlock.status = "InDBS"
         dbsBlock.setDataset(childFiles[0]["datasetPath"], 'data', 'VALID')
         dbsUtil.createBlocks([dbsBlock])
@@ -622,21 +625,6 @@ class DBSUploadTest(unittest.TestCase):
             # We don't trust anyone else with _exit
             del os.environ["DONT_TRAP_EXIT"]
         return
-
-    def testPassiveExceptions(self):
-        """
-        Ensure we are properly evaluating passive/hard exceptions in the
-        `isPassiveError` function.
-        """
-        # hard errors
-        for errMessage in ["Unknown exception", "Proxy WRONG Error", None]:
-            self.assertIs(isPassiveError(MyTestException(errMessage)), False)
-        # soft errors
-        for errMessage in ['Service Unavailable', 'Service Temporarily Unavailable',
-                           'Proxy Error', 'Error reading from remote server',
-                           'Connection refused', 'timed out', 'Could not resolve',
-                           'OpenSSL SSL_connect: SSL_ERROR_SYSCALL']:
-            self.assertIs(isPassiveError(MyTestException(errMessage)), True)
 
     def testParseDBSException(self):
         """

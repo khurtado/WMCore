@@ -25,10 +25,6 @@ from Utils.CertTools import ckey, cert
 from WMCore.Services.pycurl_manager import RequestHandler
 from WMCore.Services.pycurl_manager import getdata as multi_getdata
 
-# DBS agregators
-from dbs.apis.dbsClient import aggRuns, aggFileLumis
-
-
 # static variables
 STEP_PAT = re.compile(r'Step[0-9]')
 TASK_PAT = re.compile(r'Task[0-9]')
@@ -279,6 +275,11 @@ def getFileLumisInBlock(blocks, dbsUrl, validFileOnly=1):
     :param validFileOnly: integer flag for valid files only or not
     :return: a dict of blocks with list of file/run/lumi info
     """
+    # importing dbs3-client only in the functions where it is used so that 
+    # we do not need to add it to the docker images of microservices that do
+    # not use it.
+    from dbs.apis.dbsClient import aggFileLumis
+
     runLumisByBlock = {}
     urls = ['%s/filelumis?validFileOnly=%d&block_name=%s' % (dbsUrl, validFileOnly, quote(b)) for b in blocks]
     # limit it to 10 concurrent calls not to overload DBS
@@ -343,6 +344,11 @@ def getRunsInBlock(blocks, dbsUrl):
     :param dbsUrl: string with the DBS URL
     :return: a dictionary of block names and a list of run numbers
     """
+    # importing dbs3-client only in the functions where it is used so that 
+    # we do not need to add it to the docker images of microservices that do
+    # not use it.
+    from dbs.apis.dbsClient import aggRuns
+
     runsByBlock = {}
     urls = ['%s/runs?block_name=%s' % (dbsUrl, quote(b)) for b in blocks]
     logging.info("Executing %d requests against DBS 'runs' API", len(urls))
@@ -539,50 +545,6 @@ def postRequest(url, params):
     data = mgr.getdata(url, params, headers, ckey=ckey(), cert=cert(),
                        verb='POST', verbose=verbose)
     return data
-
-
-def getIO(request, dbsUrl):
-    "Get input/output info about given request"
-    lhe = False
-    primary = set()
-    parent = set()
-    secondary = set()
-    if 'Chain' in request['RequestType']:
-        base = request['RequestType'].replace('Chain', '')
-        item = 1
-        while '%s%d' % (base, item) in request:
-            alhe, aprimary, aparent, asecondary = \
-                ioForTask(request['%s%d' % (base, item)], dbsUrl)
-            if alhe:
-                lhe = True
-            primary.update(aprimary)
-            parent.update(aparent)
-            secondary.update(asecondary)
-            item += 1
-    else:
-        lhe, primary, parent, secondary = ioForTask(request, dbsUrl)
-    return lhe, primary, parent, secondary
-
-
-def ioForTask(request, dbsUrl):
-    "Return lfn, primary, parent and secondary datasets for given request"
-    lhe = False
-    primary = set()
-    parent = set()
-    secondary = set()
-    if 'InputDataset' in request:
-        datasets = request['InputDataset']
-        datasets = datasets if isinstance(datasets, list) else [datasets]
-        primary = set([r for r in datasets if r])
-    if primary and 'IncludeParent' in request and request['IncludeParent']:
-        parent = findParent(primary, dbsUrl)
-    if 'MCPileup' in request:
-        pileups = request['MCPileup']
-        pileups = pileups if isinstance(pileups, list) else [pileups]
-        secondary = set([r for r in pileups if r])
-    if 'LheInputFiles' in request and request['LheInputFiles'] in ['True', True]:
-        lhe = True
-    return lhe, primary, parent, secondary
 
 
 def findParent(datasets, dbsUrl):

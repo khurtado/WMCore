@@ -1,13 +1,9 @@
 """
-File       : MSOtput.py
+File       : MSOutput.py
 
 Description: MSOutput.py class provides the whole logic behind
 the Output data placement in WMCore MicroServices.
 """
-
-# futures
-from __future__ import division, print_function
-from future.utils import viewitems
 
 # system modules
 import time
@@ -18,7 +14,7 @@ from retry import retry
 
 # WMCore modules
 from WMCore.MicroService.DataStructs.DefaultStructs import OUTPUT_REPORT
-from WMCore.MicroService.MSCore import MSCore
+from WMCore.MicroService.MSCore.MSCore import MSCore
 from WMCore.MicroService.Tools.Common import gigaBytes
 from WMCore.Services.CRIC.CRIC import CRIC
 from WMCore.Services.DBS.DBS3Reader import getDataTiers
@@ -34,7 +30,7 @@ class MSOutputException(WMException):
     General Exception Class for MSOutput Module in WMCore MicroServices
     """
     def __init__(self, message):
-        self.myMessage = "MSOtputException: %s" % message
+        self.myMessage = "MSOutputException: %s" % message
         super(MSOutputException, self).__init__(self.myMessage)
 
 
@@ -85,16 +81,17 @@ class MSOutput(MSCore):
         self.mode = mode
         self.msConfig.setdefault("limitRequestsPerCycle", 500)
         self.msConfig.setdefault("enableDataPlacement", False)
+        # Enable relval workflows to go to tape
         self.msConfig.setdefault("enableRelValCustodial", False)
+        # Enable relval workflows to go to disk
+        self.msConfig.setdefault("enableRelValDisk", False)
         self.msConfig.setdefault("excludeDataTier", [])
         self.msConfig.setdefault("rucioAccount", 'wmcore_transferor')
-        self.msConfig.setdefault("rucioRSEAttribute", 'ddm_quota')
-        self.msConfig.setdefault("rucioDiskRuleWeight", 'ddm_quota')
+        self.msConfig.setdefault("rucioRSEAttribute", 'dm_weight')
+        self.msConfig.setdefault("rucioDiskRuleWeight", 'dm_weight')
         self.msConfig.setdefault("rucioTapeExpression", 'rse_type=TAPE\cms_type=test')
         # This Disk expression wil target all real DISK T1 and T2 RSEs
         self.msConfig.setdefault("rucioDiskExpression", '(tier=2|tier=1)&cms_type=real&rse_type=DISK')
-        self.msConfig.setdefault("mongoDBUrl", 'mongodb://localhost')
-        self.msConfig.setdefault("mongoDBPort", 8230)
         # fetch documents created in the last 6 months (default value)
         self.msConfig.setdefault("mongoDocsCreatedSecs", 6 * 30 * 24 * 60 * 60)
         self.msConfig.setdefault("sendNotification", False)
@@ -118,20 +115,37 @@ class MSOutput(MSCore):
         self.campaigns = {}
         self.psn2pnnMap = {}
 
+        self.msConfig.setdefault("mongoDBRetryCount", 3)
+        self.msConfig.setdefault("mongoDBReplicaSet", None)
+        self.msConfig.setdefault("mongoDBPort", None)
+        self.msConfig.setdefault("mockMongoDB", False)
+
         msOutIndex = IndexModel('RequestName', unique=True)
+
+        # NOTE: A full set of valid database connection parameters can be found at:
+        #       https://pymongo.readthedocs.io/en/stable/api/pymongo/mongo_client.html
         msOutDBConfig = {
-            'database': 'msOutDB',
-            'server': self.msConfig['mongoDBUrl'],
+            'database': self.msConfig['mongoDB'],
+            'server': self.msConfig['mongoDBServer'],
+            'replicaSet': self.msConfig['mongoDBReplicaSet'],
             'port': self.msConfig['mongoDBPort'],
+            'username': self.msConfig['mongoDBUser'],
+            'password': self.msConfig['mongoDBPassword'],
+            'connect': True,
+            'directConnection': False,
             'logger': self.logger,
             'create': True,
             'collections': [
                 ('msOutRelValColl', msOutIndex),
                 ('msOutNonRelValColl', msOutIndex)]}
 
-        self.msOutDB = MongoDB(**msOutDBConfig).msOutDB
+        mongoDB = MongoDB(**msOutDBConfig)
+        self.msOutDB = getattr(mongoDB, self.msConfig['mongoDB'])
         self.msOutRelValColl = self.msOutDB['msOutRelValColl']
         self.msOutNonRelValColl = self.msOutDB['msOutNonRelValColl']
+        self.currThread = None
+        self.currThreadIdent = None
+
 
     @retry(tries=3, delay=2, jitter=2)
     def updateCaches(self):
@@ -225,7 +239,7 @@ class MSOutput(MSCore):
 
         # filter out documents already produced
         finalRequests = []
-        for reqName, reqData in viewitems(requestRecords):
+        for reqName, reqData in requestRecords.items():
             if reqName in mongoDocNames:
                 self.logger.info("Mongo document already created for %s, skipping it.", reqName)
             else:
@@ -448,8 +462,7 @@ class MSOutput(MSCore):
         """
         # This API returns a tuple with the RSE name and whether it requires approval
         return self.rucio.pickRSE(rseExpression=self.msConfig["rucioTapeExpression"],
-                                  rseAttribute=self.msConfig["rucioRSEAttribute"],
-                                  minNeeded=dataSize)
+                                  rseAttribute=self.msConfig["rucioRSEAttribute"])
 
     def getRequestRecords(self, reqStatus):
         """
@@ -505,6 +518,7 @@ class MSOutput(MSCore):
                            (msPipelineNonRelVal, self.msOutNonRelValColl)]
         for pipeColl in pipeCollections:
             wfCounters = 0
+            wfCountersOk = 0
             pipeLine = pipeColl[0]
             dbColl = pipeColl[1]
             pipeLineName = pipeLine.getPipelineName()
@@ -512,14 +526,16 @@ class MSOutput(MSCore):
                 # FIXME:
                 #    To redefine those exceptions as MSoutputExceptions and
                 #    start using those here so we do not mix with general errors
+                wfCounters += 1
                 try:
                     pipeLine.run(docOut)
+                    wfCountersOk += 1
                 except (KeyError, TypeError) as ex:
                     msg = "%s Possibly malformed record in MongoDB. Err: %s. " % (pipeLineName, str(ex))
                     msg += "Continue to the next document."
                     self.logger.exception(msg)
                     continue
-                except EmptyResultError as ex:
+                except EmptyResultError:
                     msg = "%s All relevant records in MongoDB exhausted. " % pipeLineName
                     msg += "We are done for the current cycle."
                     self.logger.info(msg)
@@ -528,10 +544,12 @@ class MSOutput(MSCore):
                     msg = "%s General error from pipeline. Err: %s. " % (pipeLineName, str(ex))
                     msg += "Will retry again in the next cycle."
                     self.logger.exception(msg)
-                    break
-                wfCounters += 1
-            self.logger.info("Processed %d workflows from pipeline: %s", wfCounters, pipeLineName)
-            wfCounterTotal += wfCounters
+                    workflowname = docOut.get("_id", "")
+                    self.alertGenericError(self.mode, workflowname, msg, str(ex), str(docOut))
+                    continue
+            self.logger.info("Successfully processed %d workflows from pipeline: %s", wfCountersOk, pipeLineName)
+            self.logger.info("Failed to process %d workflows from pipeline: %s", wfCounters - wfCountersOk, pipeLineName)
+            wfCounterTotal += wfCountersOk
 
         return wfCounterTotal
 
@@ -565,12 +583,12 @@ class MSOutput(MSCore):
                                         Functor(self.docCleaner)])
         # TODO:
         #    To generate the object from within the Function scope see above.
-        counter = 0
+        counterOk = 0
         for request in requestRecords:
-            counter += 1
+            pipeLineName = msPipeline.getPipelineName()
             try:
-                pipeLineName = msPipeline.getPipelineName()
                 msPipeline.run(request)
+                counterOk += 1
             except (KeyError, TypeError) as ex:
                 msg = "%s Possibly broken read from ReqMgr2 API or other. Err: %s." % (pipeLineName, str(ex))
                 msg += " Continue to the next document."
@@ -580,8 +598,10 @@ class MSOutput(MSCore):
                 msg = "%s General Error from pipeline. Err: %s. " % (pipeLineName, str(ex))
                 msg += "Giving up Now."
                 self.logger.exception(str(ex))
-                break
-        return counter
+                workflowname = request.get("_id", "")
+                self.alertGenericError(self.mode, workflowname, msg, str(ex), str(request))
+                continue
+        return counterOk
 
     def docTransformer(self, doc):
         """
@@ -619,7 +639,7 @@ class MSOutput(MSCore):
         A function used to update one or few particular fields in a document
         :**kwargs: The keys/value pairs to be updated (will be tested against MSOutputTemplate)
         """
-        for key, value in viewitems(kwargs):
+        for key, value in kwargs.items():
             try:
                 msOutDoc.setKey(key, value)
                 msOutDoc.updateTime()
@@ -650,7 +670,7 @@ class MSOutput(MSCore):
             # Fetch the dataset size, even if it does not go to Disk (it might go to Tape)
             try:
                 bytesSize = self._getDatasetSize(dataItem['Dataset'])
-            except KeyError as exc:
+            except KeyError:
                 # then this container is unknown to Rucio, bypass and make an alert
                 # Error is already reported in the Rucio module, do not spam here!
                 dataItem['DatasetSize'] = 0
@@ -691,16 +711,8 @@ class MSOutput(MSCore):
 
         # if there were containers not found in Rucio, create an email alert
         if notFoundDIDs:
-            # send alert via AlertManager API
-            alertName = "ms-output: output containers not found for workflow: {}".format(msOutDoc["RequestName"])
-            alertSeverity = "high"
-            alertSummary = "[MSOutput] Workflow '{}' has output datasets unknown to Rucio".format(msOutDoc["RequestName"])
-            alertDescription = "Dataset(s): {} cannot be found in Rucio. ".format(notFoundDIDs)
-            alertDescription += "Thus, we are skipping these datasets from the final output "
-            alertDescription += "data placement, such that this workflow can get archived."
-            self.logger.warning(alertDescription)
-            if self.msConfig["sendNotification"]:
-                self.alertManagerAPI.sendAlert(alertName, alertSeverity, alertSummary, alertDescription, self.alertServiceName)
+            # only log warning msg, the previous alerts to AlertManager were too noisy
+            self.logDIDNotFound(msOutDoc["RequestName"], notFoundDIDs)
 
         try:
             msOutDoc.updateDoc({"OutputMap": updatedOutputMap}, throw=True)
@@ -734,8 +746,10 @@ class MSOutput(MSCore):
         :return: True if the dataset is allowed to pass, False otherwise
         """
         # Bypass every configuration for RelVals, keep everything on disk
+        # unless the disk option for this workflow is not enabled.
         if isRelVal:
-            return True
+            return self.msConfig['enableRelValDisk']
+
         dataTier = dataItem['Dataset'].split('/')[-1]
         if dataTier in self.msConfig['excludeDataTier']:
             self.logger.warning("Skipping dataset: %s because it's excluded in the MS configuration",
@@ -751,16 +765,8 @@ class MSOutput(MSCore):
                 msg += "under campaign: {}. Letting it pass though...".format(dataItem['Campaign'])
                 self.logger.warning(msg)
                 return True
-            # send alert via AlertManager API
-            alertName = "ms-output: Campaign not found: {}".format(dataItem['Campaign'])
-            alertSeverity = "high"
-            alertSummary = "[MSOutput] Campaign '{}' not found in central CouchDB".format(dataItem['Campaign'])
-            alertDescription = "Dataset: {} cannot have an output transfer rule ".format(dataItem['Dataset'])
-            alertDescription += "because its campaign: {} cannot be found in central CouchDB.".format(dataItem['Campaign'])
-            alertDescription += " In order to get output data placement working, add it ASAP please."
-            self.logger.critical(alertDescription)
-            if self.msConfig["sendNotification"]:
-                self.alertManagerAPI.sendAlert(alertName, alertSeverity, alertSummary, alertDescription, self.alertServiceName)
+            # log and send alert via AlertManager API
+            self.alertCampaignNotFound(dataItem['Campaign'], dataItem['Dataset'])
             raise
 
         if dataTier in self.uConfig['tiers_to_DDM']['value']:
@@ -768,16 +774,8 @@ class MSOutput(MSCore):
         elif dataTier in self.uConfig['tiers_no_DDM']['value']:
             return False
         else:
-            # send alert via AlertManager API
-            alertName = "ms-output: Datatier not found: {}".format(dataTier)
-            alertSeverity = "high"
-            alertSummary = "[MSOutput] Datatier not found in the Unified configuration: {}".format(dataTier)
-            alertDescription = "Dataset: {} contains a datatier: {}".format(dataItem['Dataset'], dataTier)
-            alertDescription += " not yet inserted into Unified configuration. "
-            alertDescription += "Please add it ASAP. Letting it pass for now..."
-            self.logger.critical(alertDescription)
-            if self.msConfig["sendNotification"] and not isRelVal:
-                self.alertManagerAPI.sendAlert(alertName, alertSeverity, alertSummary, alertDescription, self.alertServiceName)
+            # log and send alert via AlertManager API
+            self.alertDatatierNotFound(dataTier, dataItem['Dataset'], isRelVal)
             return True
 
     def _getDataVolumeForTape(self, workflow):
@@ -949,8 +947,8 @@ class MSOutput(MSCore):
                 msg += " Error message was: {}".format(str(ex))
                 self.logger.exception(msg)
                 raise ex
-        else:
-            self.logger.info("%s Query: '%s' did not return any records from MongoDB", dbColl.name, mQueryDict)
+        if not counter:
+            self.logger.info("%s Query: '%s' did not return any valid record from MongoDB", dbColl.name, mQueryDict)
 
     def getTransferInfo(self, reqName):
         """
@@ -982,3 +980,79 @@ class MSOutput(MSCore):
         of the document
         """
         return doc.clear()
+
+    def logDIDNotFound(self, wflowName, containerList):
+        """
+        Log a warning message for output containers not found within
+        a given workflow.
+        :param wflowName: string with the workflow name
+        :param containerList: list of container names
+        :return: none
+        """
+        msg = "[MSOutput] Workflow '{}' has output datasets unknown to Rucio ".format(wflowName)
+        msg += "Dataset(s): {} cannot be found in Rucio. ".format(containerList)
+        msg += "Thus, we are skipping these datasets from the final output "
+        msg += "data placement, such that this workflow can get archived."
+        self.logger.warning(msg)
+
+    def alertCampaignNotFound(self, campaignName, containerName):
+        """
+        Send an alert to Prometheus for campaign not found in the database.
+        :param campaignName: string with the campaign name
+        :param containerName: string with the container name
+        :return: none
+        """
+        alertName = "ms-output: Campaign not found: {}".format(campaignName)
+        alertSeverity = "high"
+        alertSummary = "[MSOutput] Campaign '{}' not found in central CouchDB".format(campaignName)
+        alertDescription = "Dataset: {} cannot have an output transfer rule ".format(containerName)
+        alertDescription += "because its campaign: {} cannot be found in central CouchDB.".format(campaignName)
+        alertDescription += " In order to get output data placement working, add it ASAP please."
+        self.logger.critical(alertDescription)
+        if self.msConfig["sendNotification"]:
+            tag = self.alertDestinationMap.get("alertCampaignNotFound", "")
+            self.sendAlert(alertName, alertSeverity, alertSummary, alertDescription,
+                           self.alertServiceName, tag=tag)
+
+    def alertDatatierNotFound(self, datatierName, containerName, isRelVal):
+        """
+        Send an alert to Prometheus for datatier not found in the configuration.
+        :param datatierName: string with the datatier name
+        :param containerName: string with the container name
+        :param isRelVal: boolean whether it's a RelVal workflow or not
+        :return: none
+        """
+        alertName = "ms-output: Datatier not found: {}".format(datatierName)
+        alertSeverity = "high"
+        alertSummary = "[MSOutput] Datatier not found in the Unified configuration: {}".format(datatierName)
+        alertDescription = "Dataset: {} contains a datatier: {}".format(containerName, datatierName)
+        alertDescription += " not yet inserted into Unified configuration. "
+        alertDescription += "Please add it ASAP. Letting it pass for now..."
+        self.logger.critical(alertDescription)
+        if self.msConfig["sendNotification"] and not isRelVal:
+            tag = self.alertDestinationMap.get("alertDatatierNotFound", "")
+            self.sendAlert(alertName, alertSeverity, alertSummary, alertDescription,
+                           self.alertServiceName, tag=tag)
+
+    def alertGenericError(self, caller, workflowname, msg, exMsg, document):
+        """
+        Send an alert to Prometheus in the case of a generic error with ms-output
+
+        :param caller: str, indicates if the error comes from Producer or Consumer
+        :param workflowname: str, representing the workflow name
+        :param msg: str, context about the error
+        :param exMsg: str, excetpion message
+        :param document: str, serialized mongodb document
+        :return: none
+        """
+        alertName = "ms-output: Generic MSOutput error inside {} while processing workflow '{}'".format(caller, workflowname)
+        alertSeverity = "high"
+        alertSummary = "[MSOutput] Generic MSOutput error inside {} while processing workflow '{}'".format(caller, workflowname)
+        alertDescription = "wf: {}\n\nmsg: {}\n\nex: {}\n\n{}".format(workflowname, msg, exMsg, document)
+        self.logger.error("%s\n%s\n%s", alertName, alertSummary, alertDescription)
+        if self.msConfig["sendNotification"]:
+            tag = self.alertDestinationMap.get("alertGenericError", "")
+            self.sendAlert(alertName, alertSeverity, alertSummary, alertDescription,
+                           self.alertServiceName, tag=tag)
+
+

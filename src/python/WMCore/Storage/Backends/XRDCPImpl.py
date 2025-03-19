@@ -117,7 +117,8 @@ class XRDCPImpl(StageOutImpl):
             self.xrdfsCmd = "xrdfs"
 
         copyCommand += "%s --force --nopbar " % xrdcpCmd
-
+        
+        
         if copyCommandOptions:
             copyCommand += "%s " % copyCommandOptions
 
@@ -127,7 +128,8 @@ class XRDCPImpl(StageOutImpl):
 
         copyCommand += " \"%s\" " % sourcePFN
         copyCommand += " \"%s\" \n" % targetPFN
-
+        copyCommand += "RC=$? \n"
+        copyCommand += "echo \"xrdcp exit code: $RC\" \n"
         if self.stageIn:
             copyCommand += "LOCAL_SIZE=`stat -c%%s \"%s\"`\n" % localPFN
             copyCommand += "echo \"Local File Size is: $LOCAL_SIZE\"\n"
@@ -148,15 +150,32 @@ class XRDCPImpl(StageOutImpl):
             copyCommand += "REMOTE_XS=`%s '%s' query checksum '%s' | grep -i adler32 | sed -r 's/.*[adler|ADLER]32[ ]*([0-9a-fA-F]{8}).*/\\1/'`\n" % (self.xrdfsCmd, host, path)
             copyCommand += "echo \"Remote File Checksum is: $REMOTE_XS\"\n"
 
-            copyCommand += "if [ $REMOTE_SIZE ] && [ $REMOTE_XS ] && [ $LOCAL_SIZE == $REMOTE_SIZE ] && [ '%s' == $REMOTE_XS ]; then exit 0; " % checksums['adler32']
-            copyCommand += "else echo \"ERROR: Size or Checksum Mismatch between local and SE\"; %s exit 60311 ; fi" % removeCommand
+            copyCommand += "if [ $RC == 0 ] && [ $REMOTE_SIZE ] && [ $REMOTE_XS ] && [ $LOCAL_SIZE == $REMOTE_SIZE ] && [ '%s' == $REMOTE_XS ]; then exit 0; " % checksums['adler32']
+            copyCommand += "else echo \"ERROR: XRootD file transfer return code is $RC. Size or Checksum Mismatch between local and SE\"; %s exit 60311 ; fi" % removeCommand
 
         else:
 
-            copyCommand += "if [ $REMOTE_SIZE ] && [ $LOCAL_SIZE == $REMOTE_SIZE ]; then exit 0; "
-            copyCommand += "else echo \"ERROR: Size Mismatch between local and SE\"; %s exit 60311 ; fi" % removeCommand
+            copyCommand += "if [ $RC == 0 ] && [ $REMOTE_SIZE ] && [ $LOCAL_SIZE == $REMOTE_SIZE ]; then exit 0; "
+            copyCommand += "else echo \"ERROR: XRootD file transfer return code is $RC. Size or Checksum Mismatch between local and SE\"; %s exit 60311 ; fi" % removeCommand
 
         return copyCommand
+    
+    def createDebuggingCommand(self, sourcePFN, targetPFN, options=None, checksums=None):
+        """
+        Debug a failed xrdcp command for stageOut, without re-running it,
+        providing information on the environment and the certifications
+
+        :sourcePFN: str, PFN of the source file
+        :targetPFN: str, destination PFN
+        :options: str, additional options for copy command
+        :checksums: dict, collect checksums according to the algorithms saved as keys
+        """
+        # Build the command for debugging purposes
+        copyCommandDict = self.buildCopyCommandDict(sourcePFN, targetPFN, options, checksums)
+        copyCommand = self.copyCommand.format_map(copyCommandDict)
+
+        result = self.debuggingTemplate.format(copy_command=copyCommand, source=copyCommandDict['source'], destination=copyCommandDict['destination'])
+        return result
 
     def removeFile(self, pfnToRemove):
         """

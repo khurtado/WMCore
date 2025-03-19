@@ -7,12 +7,7 @@
 
 from builtins import map, object
 
-from future import standard_library
-
-from Utils.PythonVersion import PY2
 from Utils.Utilities import encodeUnicodeToBytes
-
-standard_library.install_aliases()
 
 import logging
 import os
@@ -61,7 +56,8 @@ class SandboxCreator(object):
 
             extracts a sandbox at the given archivePath to the given targetPath
         """
-        os.makedirs(targetPath)
+        if not os.path.exists(targetPath):
+            os.makedirs(targetPath)
         archive = tarfile.TarFile(archivePath)
         archive.extractall(targetPath)
         archive.close()

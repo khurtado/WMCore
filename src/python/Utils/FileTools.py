@@ -3,17 +3,48 @@
 Utilities related to file handling
 """
 
-from __future__ import print_function, division
 
 import io
 import os
+import glob
 import stat
 import subprocess
 import time
 import zlib
+import logging
 
 from Utils.Utilities import decodeBytesToUnicode
-from Utils.PythonVersion import PY3
+
+
+def findFiles(path, pat):
+    """
+    Find files within given path and matching given pattern.
+    :param path: starting directory path (string)
+    :param pat: match pattern (string), e.g. *.py or name of the file
+    :return: matched file names
+    """
+    files = []
+    for idir, _, _ in os.walk(path):
+        files.extend(glob.glob(os.path.join(idir, pat)))
+    return files
+
+
+def tarMode(tfile, opMode):
+    """
+    Extract proper mode of operation for given tar file. For instance,
+    if op='r' and tfile name is file.tar.gz we should get 'r:gz',
+    while if tfile name is file.tar.bz2 we should get 'r':bz2', while
+    if tfile name is file.tar we should get 'r', etc.
+    :param opMode: mode of operation (string), e.g. 'r', or 'w'
+    :param tfile: sandbox tar file name (string)
+    :return: mode of operation
+    """
+    ext = tfile.split(".")[-1]
+    if ext == 'tar':
+        return opMode
+    mode = opMode + ':' + ext
+    return mode
+
 
 def calculateChecksums(filename):
     """
@@ -51,10 +82,7 @@ def calculateChecksums(filename):
     if len(cksumStdout) != 2 or int(cksumStdout[1]) != filesize:
         raise RuntimeError("Something went wrong with the cksum calculation !")
 
-    if PY3:
-        # using native-string approach. convert from bytes to unicode in
-        # python 3 only.
-        cksumStdout[0] = decodeBytesToUnicode(cksumStdout[0])
+    cksumStdout[0] = decodeBytesToUnicode(cksumStdout[0])
     return (format(adler32Checksum & 0xffffffff, '08x'), cksumStdout[0])
 
 
@@ -113,6 +141,7 @@ def findMagicStr(filename, matchString):
             if matchString in line:
                 yield line
 
+
 def getFullPath(name, envPath="PATH"):
     """
     :param name: file name
@@ -124,3 +153,30 @@ def getFullPath(name, envPath="PATH"):
         if os.path.exists(fullPath):
             return fullPath
     return None
+
+
+def loadEnvFile(wmaEnvFilePath, logger=None):
+    """
+    _loadEnvFile_
+    A simple function to load an additional bash env file into the current script
+    runtime environment
+    :param wmaEnvFilePath: The path to the environment file to be loaded
+    :return:               True if the script has loaded successfully, False otherwise.
+    """
+    if not logger:
+        logger = logging.getLogger()
+    subProc = subprocess.run(['bash', '-c', f'source {wmaEnvFilePath} && python -c "import os; print(repr(os.environ.copy()))" '],
+                                   capture_output=True, check=False)
+    if subProc.returncode == 0:
+        newEnv = eval(subProc.stdout)
+        os.environ.update(newEnv)
+        if subProc.stderr:
+            logger.warning("Environment file: %s loaded with errors:", wmaEnvFilePath)
+            logger.warning(subProc.stderr.decode())
+        else:
+            logger.info("Environment file: %s loaded successfully", wmaEnvFilePath)
+        return True
+    else:
+        logger.error("Failed to load environment file: %s", wmaEnvFilePath)
+        logger.error(subProc.stderr.decode())
+        return False

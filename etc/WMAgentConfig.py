@@ -99,6 +99,12 @@ config.JobStateMachine.couchurl = couchURL
 config.JobStateMachine.couchDBName = jobDumpDBName
 config.JobStateMachine.jobSummaryDBName = jobSummaryDBName
 config.JobStateMachine.summaryStatsDBName = summaryStatsDBName
+# Amount of documents allowed in the ChangeState module for bulk commits
+config.JobStateMachine.maxBulkCommitDocs = 250
+# total allowed serialized size for the FJR document that is uploaded to wmagent_jobdump/fwjrs
+# NOTE: this needs to be in sync with CouchDB couchdb.max_document_size parameter
+# see: https://docs.couchdb.org/en/latest/config/couchdb.html#couchdb/max_document_size
+config.JobStateMachine.fwjrLimitSize = 8 * 1000**2  # default: 8 million bytes (not 8MB!!!)
 
 config.section_("ACDC")
 config.ACDC.couchurl = "https://cmsweb.cern.ch/couchdb"
@@ -141,7 +147,13 @@ config.WorkQueueManager.queueParams["ParentQueueCouchUrl"] = "https://cmsweb.cer
 config.WorkQueueManager.queueParams["QueueURL"] = "http://%s:5984" % (config.Agent.hostName)
 config.WorkQueueManager.queueParams["WorkPerCycle"] = 200  # don't pull more than this number of elements per cycle
 config.WorkQueueManager.queueParams["QueueDepth"] = 0.5  # pull work from GQ for only half of the resources
-config.WorkQueueManager.queueParams["rucioAccount"] = "wmcore_transferor"  # account for data locks
+# number of available elements to be retrieved within a single CouchDB http request
+config.WorkQueueManager.queueParams["RowsPerSlice"] = 2500
+# maximum number of available elements rows to be evaluated when acquiring GQ to LQ work
+config.WorkQueueManager.queueParams["MaxRowsPerCycle"] = 50000
+# Rucio accounts for input data locks and secondary data locks
+config.WorkQueueManager.queueParams["rucioAccount"] = "wmcore_transferor"
+config.WorkQueueManager.queueParams["rucioAccountPU"] = "wmcore_pileup"
 
 
 config.component_("DBS3Upload")
@@ -153,10 +165,11 @@ config.DBS3Upload.pollInterval = 100
 # "https://cmsweb-prod.cern.ch/dbs/prod/global/DBSWriter" - production one
 config.DBS3Upload.dbsUrl = "OVERWRITE_BY_SECRETS"
 config.DBS3Upload.primaryDatasetType = "mc"
-config.DBS3Upload.dumpBlock = False  # to dump block meta-data into a json file
+# provided a block name, this will dump all the block info in a json file
+config.DBS3Upload.dumpBlockJsonFor = ""
 # set DbsApi requests to use gzip enconding, thus sending compressed data
-# please change to True when new DBSWriter Go server will be in place
-config.DBS3Upload.gzipEncoding = False
+config.DBS3Upload.gzipEncoding = True
+config.DBS3Upload.uploaderName = "WMAgent"
 
 config.section_("DBSInterface")
 config.DBSInterface.DBSUrl = globalDBSUrl
@@ -202,12 +215,13 @@ config.JobSubmitter.pollInterval = 120
 config.JobSubmitter.workerThreads = 1
 config.JobSubmitter.jobsPerWorker = 100
 config.JobSubmitter.maxJobsPerPoll = 1000
-config.JobSubmitter.maxJobsToCache = 50000
+config.JobSubmitter.maxJobsToCache = 100000  # used to be 50k
 config.JobSubmitter.cacheRefreshSize = 30000  # set -1 if cache need to refresh all the time.
 config.JobSubmitter.skipRefreshCount = 20  # (If above the threshold meet, cache will updates every 20 polling cycle) 120 * 20 = 40 minutes
 config.JobSubmitter.submitScript = os.path.join(os.environ["WMCORE_ROOT"], submitScript)
 config.JobSubmitter.extraMemoryPerCore = 500  # in MB
 config.JobSubmitter.drainGraceTime = 2 * 24 * 60 * 60  # in seconds
+config.JobSubmitter.useOauthToken = False
 
 config.component_("JobTracker")
 config.JobTracker.namespace = "WMComponent.JobTracker.JobTracker"
@@ -365,10 +379,22 @@ config.RucioInjector.cacheExpiration = 2 * 24 * 60 * 60  # two days
 config.RucioInjector.createBlockRules = True
 config.RucioInjector.RSEPostfix = False  # enable it to append _Test to the RSE names
 config.RucioInjector.metaDIDProject = "Production"
-config.RucioInjector.containerDiskRuleParams = {"weight": "ddm_quota", "copies": 2, "grouping": "DATASET"}
+config.RucioInjector.containerDiskRuleParams = {"weight": "dm_weight", "copies": 2, "grouping": "DATASET"}
 config.RucioInjector.blockRuleParams = {}
 # this RSEExpr below might be updated by wmagent-mod-config script
 config.RucioInjector.containerDiskRuleRSEExpr = "(tier=2|tier=1)&cms_type=real&rse_type=DISK"
 config.RucioInjector.rucioAccount = "OVER_WRITE_BY_SECRETS"
 config.RucioInjector.rucioUrl = "OVER_WRITE_BY_SECRETS"
 config.RucioInjector.rucioAuthUrl = "OVER_WRITE_BY_SECRETS"
+
+config.component_("WorkflowUpdater")
+config.WorkflowUpdater.namespace = "WMComponent.WorkflowUpdater.WorkflowUpdater"
+config.WorkflowUpdater.componentDir = config.General.workDir + "/WorkflowUpdater"
+config.WorkflowUpdater.logLevel = globalLogLevel
+config.WorkflowUpdater.pollInterval = 8 * 60 * 60  # every 8 hours
+config.WorkflowUpdater.dbsUrl = "OVER_WRITE_BY_SECRETS"
+config.WorkflowUpdater.wmstatsUrl = "OVER_WRITE_BY_SECRETS"
+config.WorkflowUpdater.rucioAccount = "wmcore_pileup"
+config.WorkflowUpdater.rucioUrl = "OVER_WRITE_BY_SECRETS"
+config.WorkflowUpdater.rucioAuthUrl = "OVER_WRITE_BY_SECRETS"
+config.WorkflowUpdater.msPileupUrl = "OVER_WRITE_BY_SECRETS"

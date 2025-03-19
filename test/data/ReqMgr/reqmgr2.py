@@ -14,13 +14,9 @@ Production ConfigCache: https://cmsweb.cern.ch/couchdb/reqmgr_config_cache/
 Note: tests for checking data directly in CouchDB in ReqMgr1 test script:
     WMCore/test/data/ReqMgr/reqmgr.py
 """
-from __future__ import print_function
+
 
 from builtins import object, str as newstr, bytes as newbytes, next
-from future.utils import viewitems
-
-from future import standard_library
-standard_library.install_aliases()
 
 import json
 import logging
@@ -417,18 +413,18 @@ def process_request_args(input_config_file, command_line_json, logger):
             if k in cli_json:
                 request_args[k].update(cli_json[k])
     else:
-        logger.warn("No request arguments to override (--json)? Some values will be wrong.")
+        logger.warning("No request arguments to override (--json)? Some values will be wrong.")
 
     # iterate over all items recursively and warn about those ending with
     # OVERRIDE-ME, hence not overridden
     def check(items):
         for k, v in items:
             if isinstance(v, dict):
-                check(viewitems(v))
+                check(v.items())
             if isinstance(v, newstr) and v.endswith("OVERRIDE-ME"):
                 logger.warning("Not properly set: %s: %s", k, v)
 
-    check(viewitems(request_args))
+    check(request_args.items())
     return request_args
 
 

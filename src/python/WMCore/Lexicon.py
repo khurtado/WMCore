@@ -26,7 +26,7 @@ from WMCore.WMException import WMException, WMEXCEPTION_START_STR, WMEXCEPTION_E
 # i.e production should end with v[number]
 PRIMARY_DS = {'re': '^[a-zA-Z][a-zA-Z0-9\-_]*$', 'maxLength': 99}
 PROCESSED_DS = {'re': '[a-zA-Z0-9\.\-_]+', 'maxLength': 199}
-TIER = {'re': '[A-Z\-_]+', 'maxLength': 99}
+TIER = {'re': '[A-Z0-9\-_]+', 'maxLength': 99}
 BLOCK_STR = {'re': '#[a-zA-Z0-9\.\-_]+', 'maxLength': 100}
 
 lfnParts = {
@@ -99,11 +99,11 @@ def searchblock(candidate):
     """
     A block name with a * wildcard one or more times in it.
     """
-    regexp = r"^/(\*|[a-zA-Z\*][a-zA-Z0-9_\*]{0,100})(/(\*|[a-zA-Z0-9_\.\-\*]{1,199})){0,1}(/(\*|[A-Z\-\*]{1,99})(#(\*|[a-zA-Z0-9\.\-_\*]){0,100}){0,1}){0,1}$"
+    regexp = r"^/(\*|[a-zA-Z\*][a-zA-Z0-9_\*]{0,100})(/(\*|[a-zA-Z0-9_\.\-\*]{1,199})){0,1}(/(\*|[A-Z0-9\-\*]{1,99})(#(\*|[a-zA-Z0-9\.\-_\*]){0,100}){0,1}){0,1}$"
     return check(regexp, candidate)
 
 
-SEARCHDATASET_RE = r'^/(\*|[a-zA-Z\*][a-zA-Z0-9_\*\-]{0,100})(/(\*|[a-zA-Z0-9_\.\-\*]{1,199})){0,1}(/(\*|[A-Z\-\*]{1,50})){0,1}$'
+SEARCHDATASET_RE = r'^/(\*|[a-zA-Z\*][a-zA-Z0-9_\*\-]{0,100})(/(\*|[a-zA-Z0-9_\.\-\*]{1,199})){0,1}(/(\*|[A-Z0-9\-\*]{1,99})){0,1}$'
 
 
 def searchdataset(candidate):
@@ -202,7 +202,7 @@ def globalTag(candidate):
     return check(r'[a-zA-Z0-9\s\.\-_:]{1,100}$', candidate)
 
 
-DATASET_RE = r'^/[a-zA-Z0-9\-_]{1,99}/[a-zA-Z0-9\.\-_]{1,199}/[A-Z\-]{1,50}$'
+DATASET_RE = r'^/[a-zA-Z0-9\-_]{1,99}/[a-zA-Z0-9\.\-_]{1,199}/[A-Z0-9\-]{1,99}$'
 
 
 def dataset(candidate):
@@ -354,8 +354,8 @@ def lfn(candidate):
 
     Add for LHE files: /data/lhe/...
     """
-    regexp1 = '/([a-z]+)/([a-z0-9]+)/(%(era)s)/([a-zA-Z0-9\-_]+)/([A-Z\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}/([0-9]+)/([a-zA-Z0-9\-_]+).root' % lfnParts
-    regexp2 = '/([a-z]+)/([a-z0-9]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}/([0-9]+)/([a-zA-Z0-9\-_]+).root'
+    regexp1 = '/([a-z]+)/([a-z0-9]+)/(%(era)s)/([a-zA-Z0-9\-_]+)/([A-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}/([0-9]+)/([a-zA-Z0-9\-_]+).root' % lfnParts
+    regexp2 = '/([a-z]+)/([a-z0-9]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}/([0-9]+)/([a-zA-Z0-9\-_]+).root'
     regexp3 = '/store/(temp/)*(user|group)/(%(hnName)s|%(physics_group)s)/%(primDS)s/%(procDS)s/%(version)s/%(counter)s/%(root)s' % lfnParts
     regexp4 = '/store/(temp/)*(user|group)/(%(hnName)s|%(physics_group)s)/%(primDS)s/(%(subdir)s/)+%(root)s' % lfnParts
 
@@ -437,8 +437,8 @@ def lfnBase(candidate):
     As lfn above, but for doing the lfnBase
     i.e., for use in spec generation and parsing
     """
-    regexp1 = '/([a-z]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z\-_]+)/([a-zA-Z0-9\-_]+)'
-    regexp2 = '/([a-z]+)/([a-z0-9]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}'
+    regexp1 = '/([a-z]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)'
+    regexp2 = '/([a-z]+)/([a-z0-9]+)/([a-z0-9]+)/([a-zA-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)/([A-Z0-9\-_]+)/([a-zA-Z0-9\-_]+)((/[0-9]+){3}){0,1}'
     regexp3 = '/(store)/(temp/)*(user|group)/(%(hnName)s|%(physics_group)s)/%(primDS)s/%(procDS)s/%(version)s' % lfnParts
 
     tier0LFN = '/store/(backfill/[0-9]/){0,1}(t0temp/|unmerged/){0,1}(data|express|hidata)/%(era)s/%(primDS)s/%(tier)s/%(version)s/%(counter)s/%(counter)s/%(counter)s' % lfnParts

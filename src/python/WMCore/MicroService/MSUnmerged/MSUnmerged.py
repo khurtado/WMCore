@@ -14,6 +14,7 @@ from __future__ import division, print_function
 
 from pprint import pformat
 from time import time
+from datetime import datetime
 
 import random
 import re
@@ -32,7 +33,7 @@ from pymongo.errors  import NotPrimaryError
 
 # WMCore modules
 from WMCore.MicroService.DataStructs.DefaultStructs import UNMERGED_REPORT
-from WMCore.MicroService.MSCore import MSCore
+from WMCore.MicroService.MSCore.MSCore import MSCore
 from WMCore.MicroService.MSUnmerged.MSUnmergedRSE import MSUnmergedRSE
 from WMCore.Services.RucioConMon.RucioConMon import RucioConMon
 from WMCore.Services.WMStatsServer.WMStatsServer import WMStatsServer
@@ -106,26 +107,31 @@ class MSUnmerged(MSCore):
         self.msConfig.setdefault("emulateGfal2", False)
         self.msConfig.setdefault("filesToDeleteSliceSize", 100)
 
-        self.msConfig.setdefault("mongoDBUrl", 'mongodb://localhost')
-        self.msConfig.setdefault("mongoDBPort", 27017)
-        self.msConfig.setdefault("mongoDB", 'msUnmergedDB')
         self.msConfig.setdefault("mongoDBRetryCount", 3)
-        self.msConfig.setdefault("mongoDBReplicaset", None)
+        self.msConfig.setdefault("mongoDBReplicaSet", None)
+        self.msConfig.setdefault("mongoDBPort", None)
         self.msConfig.setdefault("mockMongoDB", False)
 
         msUnmergedIndex = IndexModel('name', unique=True)
+
+        # NOTE: A full set of valid database connection parameters can be found at:
+        #       https://pymongo.readthedocs.io/en/stable/api/pymongo/mongo_client.html
         msUnmergedDBConfig = {
             'database': self.msConfig['mongoDB'],
-            'server': self.msConfig['mongoDBUrl'],
+            'server': self.msConfig['mongoDBServer'],
             'port': self.msConfig['mongoDBPort'],
-            'replicaset': self.msConfig['mongoDBReplicaset'],
+            'replicaSet': self.msConfig['mongoDBReplicaSet'],
+            'username': self.msConfig['mongoDBUser'],
+            'password': self.msConfig['mongoDBPassword'],
+            'connect': True,
+            'directConnection': False,
             'logger': self.logger,
             'create': True,
             'mockMongoDB': self.msConfig['mockMongoDB'],
             'collections': [('msUnmergedColl', msUnmergedIndex)]}
 
-        mongoClt = MongoDB(**msUnmergedDBConfig)
-        self.msUnmergedDB = getattr(mongoClt, self.msConfig['mongoDB'])
+        mongoDB = MongoDB(**msUnmergedDBConfig)
+        self.msUnmergedDB = getattr(mongoDB, self.msConfig['mongoDB'])
         self.msUnmergedColl = self.msUnmergedDB['msUnmergedColl']
 
         if self.msConfig['emulateGfal2'] is False and gfal2 is None:
@@ -192,11 +198,11 @@ class MSUnmerged(MSCore):
                 msg = "WMStatsServer.getProtectedLFNs for T0 is not yet implemented."
                 raise NotImplementedError(msg)
                 # protectedLFNs = set(self.wmstatsSvcT0.getProtectedLFNs())
-                if not protectedLFNsT0:
-                    msg = "Could not fetch the protectedLFNs list from T0 WMStatServer. "
-                    msg += "Skipping the current run."
-                    self.logger.error(msg)
-                    return summary
+                # if not protectedLFNsT0:
+                #     msg = "Could not fetch the protectedLFNs list from T0 WMStatServer. "
+                #     msg += "Skipping the current run."
+                #     self.logger.error(msg)
+                #     return summary
 
             self.protectedLFNs = self.protectedLFNs | protectedLFNsT0
 
@@ -311,7 +317,7 @@ class MSUnmerged(MSCore):
             msg = "RSE: %s, Failed to create gfal2 Context object. " % rse['name']
             msg += "Skipping it in the current run."
             self.logger.exception(msg)
-            raise MSUnmergedPlineExit(msg)
+            raise MSUnmergedPlineExit(msg) from ex
 
         filesToDeleteCurrRSE = 0
 
@@ -349,36 +355,62 @@ class MSUnmerged(MSCore):
                 self.logger.debug(msg, rse['name'], dirLfn, len(pfnList), twFormat(pfnList, maxLength=4))
 
                 if self.msConfig['enableRealMode']:
-                    # execute the actual deletion in bulk - full list of files per directory
+                    # The following two bool flags are to track the success for directory removal
+                    # during all consecutive attempts/steps of cleaning the current branch.
+                    rmdirSuccess = False
+                    purgeSuccess = False
+                    filesDeletedSuccess = 0
+                    filesDeletedFail = 0
 
-                    deletedSuccess = 0
-                    for pfnSlice in list(grouper(pfnList, self.msConfig["filesToDeleteSliceSize"])):
-                        try:
-                            delResult = ctx.unlink(pfnSlice)
-                            # Count all the successfully deleted files (if a deletion was
-                            # successful a value of None is put in the delResult list):
-                            self.logger.debug("RSE: %s, Dir: %s, delResult: %s",
-                                              rse['name'], dirLfn, pformat(delResult))
-                            for gfalErr in delResult:
-                                if gfalErr is None:
-                                    deletedSuccess += 1
-                                else:
-                                    errMessage = os.strerror(gfalErr.code)
-                                    rse['counters']['gfalErrors'].setdefault(errMessage, 0)
-                                    rse['counters']['gfalErrors'][errMessage] += 1
-                        except Exception as ex:
-                            msg = "Error while cleaning RSE: %s. "
-                            msg += "Will retry in the next cycle. Err: %s"
-                            self.logger.exception(msg, rse['name'], str(ex))
+                    # Initially try to delete the whole directory even before emptying its content:
+                    self.logger.info("Trying to remove nonempty directory: %s", dirLfn)
+                    rmdirSuccess = self._rmDir(ctx, dirPfn)
 
-                    self.logger.info("RSE: %s, Dir: %s, filesDeletedSuccess: %s",
-                                      rse['name'], dirLfn, deletedSuccess)
-                    rse['counters']['filesDeletedSuccess'] += deletedSuccess
+                    # If the directory was considered successfully removed, update the file counters with the length of the directory contents
+                    # If the above operation fails try to execute the directory contents deletion in bulk - full list of files per directory
+                    if rmdirSuccess:
+                        filesDeletedSuccess = len(pfnList)
+                    else:
+                        msg = "Trying to clean the contents of nonempty directory: %s "
+                        msg += "in slices of: %s files"
+                        self.logger.info(msg, dirLfn, self.msConfig["filesToDeleteSliceSize"])
+                        for pfnSlice in list(grouper(pfnList, self.msConfig["filesToDeleteSliceSize"])):
+                            try:
+                                delResult = ctx.unlink(pfnSlice)
+                                # Count all the successfully deleted files (if a deletion was
+                                # successful a value of None is put in the delResult list):
+                                self.logger.debug("RSE: %s, Dir: %s, delResult: %s",
+                                                  rse['name'], dirLfn, pformat(delResult))
+                                for gfalErr in delResult:
+                                    if gfalErr is None:
+                                        filesDeletedSuccess += 1
+                                    else:
+                                        filesDeletedFail += 1
+                                        errMessage = os.strerror(gfalErr.code)
+                                        rse['counters']['gfalErrors'].setdefault(errMessage, 0)
+                                        rse['counters']['gfalErrors'][errMessage] += 1
+                            except Exception as ex:
+                                msg = "Error while cleaning RSE: %s. "
+                                msg += "Will retry in the next cycle. Err: %s"
+                                self.logger.exception(msg, rse['name'], str(ex))
 
-                    # Now clean the whole branch
-                    self.logger.debug("Purging dirEntry: %s:\n", dirPfn)
-                    purgeSuccess = self._purgeTree(ctx, dirPfn)
-                    if purgeSuccess:
+                        self.logger.info("RSE: %s, Dir: %s, filesDeletedSuccess: %s",
+                                          rse['name'], dirLfn, filesDeletedSuccess)
+
+                        # Now delete the whole branch, which was previously cleaned file by file
+                        # First try to delete the base directory:
+                        rmdirSuccess = self._rmDir(ctx, dirPfn)
+
+                        # Then if unable to delete the base directory due to nonEmpty err or similar, try with _purgeTree() recursively
+                        if not rmdirSuccess:
+                            self.logger.info("Trying to recursively purge directory: %s:\n", dirLfn)
+                            purgeSuccess = self._purgeTree(ctx, dirPfn)
+
+                    # Updating the RSE counters with the newly successfully deleted files
+                    rse['counters']['filesDeletedSuccess'] += filesDeletedSuccess
+                    rse['counters']['filesDeletedFail'] += filesDeletedFail
+
+                    if purgeSuccess or rmdirSuccess:
                         rse['dirs']['deletedSuccess'].add(dirLfn)
                         rse['counters']['dirsDeletedSuccess'] = len(rse['dirs']['deletedSuccess'])
                         # if dirLfn in rse['dirs']['toDelete']:
@@ -386,51 +418,89 @@ class MSUnmerged(MSCore):
                         if dirLfn in rse['dirs']['deletedFail']:
                             rse['dirs']['deletedFail'].remove(dirLfn)
                         msg = "RSE: %s  Success deleting directory: %s"
-                        self.logger.info(msg, rse['name'], dirPfn)
+                        self.logger.info(msg, rse['name'], dirLfn)
                     else:
                         rse['dirs']['deletedFail'].add(dirLfn)
                         rse['counters']['dirsDeletedFail'] = len(rse['dirs']['deletedFail'])
                         msg = "RSE: %s Failed to purge directory: %s"
-                        self.logger.error(msg, rse['name'], dirPfn)
+                        self.logger.error(msg, rse['name'], dirLfn)
             else:
                 msg = "RSE: %s reached limit of files per RSE to be deleted. Skipping directory: %s. It will be retried on the next cycle."
                 self.logger.warning(msg, rse['name'], dirLfn)
         rse['isClean'] = self._checkClean(rse)
 
+        # Explicitly release all internal resources used by the gfal2 context instance
+        if ctx:
+            ctx.free()
+
         return rse
 
-    def _purgeTree(self, ctx, baseDirPfn):
+    def _rmDir(self, ctx, dirPfn):
+        """
+        Auxiliary method to be used for removing a single directory entry with gfal2
+        and handling eventual gfal errors raised.
+        :param ctx:    Gfal Context Manager object.
+        :param dirPfn: The Pfn of the directory to be removed
+        :return:       Bool: True if the removal was successful, False otherwise
+                       NOTE: An attempt to delete an already missing directory is considered a success
+        """
+        try:
+            # NOTE: For gfal2 rmdir() exit status of 0 is success
+            rmdirSuccess = ctx.rmdir(dirPfn) == 0
+        except gfal2.GError as gfalExc:
+            if gfalExc.code == errno.ENOENT:
+                self.logger.warning("MISSING directory: %s", dirPfn)
+                rmdirSuccess = True
+            else:
+                self.logger.error("FAILED to remove directory: %s: gfalException: %s, gfalErrorCode: %s", dirPfn, str(gfalExc), gfalExc.code)
+                rmdirSuccess = False
+        return rmdirSuccess
+
+
+    def _purgeTree(self, ctx, baseDirPfn, isDirEntry=False):
         """
         A method to be used for purging the tree bellow a specific branch.
         It deletes every empty directory bellow that branch + the origin at the end.
-        :param ctx:  The gfal2 context object
-        :return:     Bool: True if it managed to purge everything, False otherwise
+        :param ctx:        The gfal2 context object
+        :param baseDirPfn: The base entry for starting the recursion
+        :param isDirEntry: Bool flag to avoid extra `stat` operations
+                           NOTE: When called from inside a recursion, we have already checked if the entry point is a directory
+        :return:           Bool: True if it managed to purge everything, False otherwise
         """
         # NOTE: It deletes only directories and does not try to unlink any file.
 
-        # First test if baseDirPfn is actually a directory entry:
+        # First, test if baseDirPfn is actually a directory entry:
+        if not isDirEntry:
+            try:
+                entryStat = ctx.stat(baseDirPfn)
+                if not stat.S_ISDIR(entryStat.st_mode):
+                    self.logger.error("The base pfn: %s is not a directory entry.", baseDirPfn)
+                    return False
+            except gfal2.GError as gfalExc:
+                if gfalExc.code == errno.ENOENT:
+                    self.logger.warning("MISSING baseDir: %s", baseDirPfn)
+                    return True
+                else:
+                    self.logger.error("FAILED to open baseDir: %s: gfalException: %s, gfalErrorCode: %s", baseDirPfn, str(gfalExc), gfalExc.code)
+                    return False
+
+        # Second, recursively iterate down the tree:
+        successList = []
         try:
-            entryStat = ctx.stat(baseDirPfn)
-            if not stat.S_ISDIR(entryStat.st_mode):
-                self.logger.error("The base pfn: %s is not a directory entry.", baseDirPfn)
-                return False
+            dirEntryList = ctx.listdir(baseDirPfn)
         except gfal2.GError as gfalExc:
             if gfalExc.code == errno.ENOENT:
                 self.logger.warning("MISSING baseDir: %s", baseDirPfn)
                 return True
             else:
-                self.logger.error("FAILED to open baseDir: %s: gfalException: %s", baseDirPfn, str(gfalExc))
+                self.logger.error("FAILED to list dirEntry: %s: gfalException: %s, gfalErrorCode: %s", baseDirPfn, str(gfalExc), gfalExc.code)
                 return False
 
-        if baseDirPfn[-1] != '/':
-            baseDirPfn += '/'
-
-        # Second recursively iterate down the tree:
-        successList = []
-        for dirEntry in ctx.listdir(baseDirPfn):
+        for dirEntry in dirEntryList:
             if dirEntry in ['.', '..']:
                 continue
             dirEntryPfn = baseDirPfn + dirEntry
+            entryStat = None
             try:
                 entryStat = ctx.stat(dirEntryPfn)
             except gfal2.GError as gfalExc:
@@ -438,28 +508,18 @@ class MSUnmerged(MSCore):
                     self.logger.warning("MISSING dirEntry: %s", dirEntryPfn)
                     successList.append(True)
                 else:
-                    self.logger.error("FAILED to open dirEntry: %s: gfalException: %s", dirEntryPfn, str(gfalExc))
+                    self.logger.error("FAILED to open dirEntry: %s: gfalException: %s, gfalErrorCode: %s", dirEntryPfn, str(gfalExc), gfalExc.code)
                     successList.append(False)
+                continue
 
-            if stat.S_ISDIR(entryStat.st_mode):
-                successList.append(self._purgeTree(ctx, dirEntryPfn))
+            if entryStat and stat.S_ISDIR(entryStat.st_mode):
+                successList.append(self._purgeTree(ctx, dirEntryPfn, isDirEntry=True))
 
-        # Finally remove the baseDir:
-        try:
-            self.logger.debug("RM baseDir: %s", baseDirPfn)
-            success = ctx.rmdir(baseDirPfn)
-            # for gfal2 rmdir() exit status of 0 is success
-            if success == 0:
-                successList.append(True)
-            else:
-                successList.append(False)
-        except gfal2.GError as gfalExc:
-            if gfalExc.code == errno.ENOENT:
-                self.logger.warning("MISSING baseDir: %s", baseDirPfn)
-                successList.append(True)
-            else:
-                self.logger.error("FAILED to remove baseDir: %s: gfalException: %s", baseDirPfn, str(gfalExc))
-                successList.append(False)
+        # Finally, remove the baseDir:
+        self.logger.debug("RM baseDir: %s", baseDirPfn)
+        success = self._rmDir(ctx, baseDirPfn)
+        successList.append(success)
+
         return all(successList)
 
     def _checkClean(self, rse):
@@ -529,7 +589,7 @@ class MSUnmerged(MSCore):
                 msg = "Could not reset RSE to MongoDB for the maximum of %s mongoDBRetryCounts configured." % self.msConfig['mongoDBRetryCount']
                 msg += "Giving up now. The whole cleanup process will be retried for this RSE on the next run."
                 msg += "Duplicate deletion retries may cause error messages from false positives and wrong counters during next polling cycle."
-                raise MSUnmergedPlineExit(msg)
+                raise MSUnmergedPlineExit(msg) from None
 
         # Before returning the RSE update Consistency StatTime:
         rse['timestamps']['rseConsStatTime'] = self.rseConsStats[rseName]['end_time']
@@ -798,7 +858,7 @@ class MSUnmerged(MSCore):
         :param rse: The RSE object to work on
         :return:    rse
         """
-        self.logger.info("RSE: %s Reading rse data from MongoDB." % rse['name'])
+        self.logger.info("RSE: %s Reading rse data from MongoDB.", rse['name'])
         rse.readRSEFromMongoDB(self.msUnmergedColl)
         return rse
 
@@ -809,13 +869,13 @@ class MSUnmerged(MSCore):
         :return:    rse
         """
         try:
-            self.logger.info("RSE: %s Writing rse data to MongoDB." % rse['name'])
+            self.logger.info("RSE: %s Writing rse data to MongoDB.", rse['name'])
             rse.writeRSEToMongoDB(self.msUnmergedColl, fullRSEToDB=fullRSEToDB, overwrite=overwrite, retryCount=self.msConfig['mongoDBRetryCount'])
         except NotPrimaryError:
             msg = "Could not write RSE to MongoDB for the maximum of %s mongoDBRetryCounts configured." % self.msConfig['mongoDBRetryCount']
             msg += "Giving up now. The whole cleanup process will be retried for this RSE on the next run."
             msg += "Duplicate deletion retries may cause error messages from false positives and wrong counters during next polling cycle."
-            raise MSUnmergedPlineExit(msg)
+            raise MSUnmergedPlineExit(msg) from None
         return rse
 
     def getStatsFromMongoDB(self, detail=False, **kwargs):
@@ -838,6 +898,7 @@ class MSUnmerged(MSCore):
                     "name": True,
                     "isClean": True,
                     "rucioConMonStatus": True,
+                    "timestamps": True,
                     "counters": {
                         "gfalErrors": True,
                         "dirsToDelete": True,
@@ -862,6 +923,14 @@ class MSUnmerged(MSCore):
                 for rseName in rseList:
                     mongoFilter = {'name': rseName}
                     data["rseData"].append(self.msUnmergedColl.find_one(mongoFilter, projection=mongoProjection))
+
+            # Rewrite all timestamps in ISO 8601 format
+            for rse in data['rseData']:
+                if 'timestamps' in rse:
+                    for dateField, dateValue in rse['timestamps'].items():
+                        dateValue = datetime.utcfromtimestamp(dateValue)
+                        dateValue = dateValue.isoformat()
+                        rse['timestamps'][dateField] = dateValue
         return data
 
     # @profile
